@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026:10:05 (hora local)
+
+**Resumen:** Se exporta el presupuesto de tiempo de la arista a `catalogos` para que el adaptador EN PROCESO de `pf-svc-core` pueda leer el mismo valor (I3). Brecha detectada al cablear el prompt 09: el presupuesto estaba como `const` privada dentro de `adapters/http`, inalcanzable para `core`.
+
+**Cambios:**
+- `ports.go`: se agrega `PresupuestoAptitud` (`2 * time.Second`) exportado, junto al puerto `AptitudRecursos` que gobierna. La obligación I3 (ADR 17) exige que el adaptador HTTP de este repo y el en proceso de `core` usen EXACTAMENTE el mismo valor; `core` lo lee de aquí en vez de duplicar el número.
+- `adapters/http/aptitud_recursos.go`: se elimina la `const presupuestoAptitud` privada y los dos `context.WithTimeout` pasan a usar `operacion.PresupuestoAptitud`. Se retira el import de `time`, ya innecesario en el adaptador HTTP.
+
+**Verificado:** gofmt limpio, `go vet ./...`, `go build ./...`, `go test ./...`, build `-mod=readonly`, arch-test OK.
+
+**Archivos modificados:**
+- `ports.go`
+- `adapters/http/aptitud_recursos.go`
+
 ## 2026:10:06 15:30
 
 **Resumen:** Se aplicaron al scaffold las decisiones de arquitectura ADR 33/34/35 (DEC-066/067/068), que resuelven tres huecos que el esqueleto inicial había dejado abiertos.
