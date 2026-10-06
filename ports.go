@@ -1,0 +1,53 @@
+package operacion
+
+import (
+	"context"
+
+	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+)
+
+// Puertos de salida que declara operacion COMO CONSUMIDOR (regla 2 de 00-indice,
+// ADR 17). La interfaz la declara el consumidor para que pf-svc-core la
+// implemente con el adaptador en proceso, y este repo con el adaptador HTTP.
+// Los tipos de entrada/salida son los generados de pf-pkg-contracts, nunca
+// escritos a mano (regla 6).
+
+// AptitudRecursos es la arista síncrona hacia catalogos. Su alcance es "lectura
+// y verificación de aptitud; nada más" (operacion.md (f)), leído a través de
+// ADR 31: catalogos es dueño de los ÁTOMOS (vehículos de AI27 y custodios), así
+// que el puerto consulta átomos. NO tiene operación de reserva ni de
+// disponibilidad: la reserva vive en asignacion, resuelta dentro de su
+// transacción con la restricción de exclusión.
+//
+// Solo se declaran operaciones que EXISTEN en catalogos.yaml de la versión
+// fijada (regla 6: 1:1 con operationId). Hoy esas son aptitudUnidad y
+// aptitudCustodio. Las listas (listarUnidades/listarCustodios) existen pero son
+// paginadas; el caso de uso de armado/asignación necesita lectura por átomo, y
+// esa superficie se añade cuando el contrato la exponga.
+//
+// BRECHAS reportadas (no se corrigen aquí; contrato primero):
+//   - C3: el contrato nombra el átomo como `Unidad` (`/api/v1/unidades`,
+//     semántica de ADR 24), no `Vehiculo` (ADR 31 §5). El puerto se tipa con lo
+//     que el contrato expone hoy; el rename espera a tracer.4.
+//   - Falta un obtenerUnidad / obtenerCustodio por id (solo hay lista + aptitud).
+//     El puerto no inventa ese método; se agrega cuando el contrato lo tenga.
+type AptitudRecursos interface {
+	// AptitudUnidad y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
+	// nunca gatean armar la unidad ni asignarla. Si catalogos no responde o el
+	// dato está obsoleto, el caso de uso muestra "aptitud desconocida" y la
+	// asignación procede. El único rechazo de asignación es la reserva fallida.
+	AptitudUnidad(ctx context.Context, unidadID catalogos.Id) (*catalogos.Aptitud, error)
+	AptitudCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Aptitud, error)
+}
+
+// Revocacion es la arista RESTRINGIDA hacia identidad (DEC-051): solo dos
+// operaciones, para el snapshot al arrancar (ADR 26 §4) y el fallback en modo
+// degradado (ADR 26 §5). operacion verifica tokens como todo módulo protegido;
+// esta no es una dependencia de dominio sino de infraestructura de autorización.
+// El adaptador HTTP vive en adapters/http/; el en proceso, en pf-svc-core.
+type Revocacion interface {
+	// ListarRevocadas devuelve las sesiones revocadas para el snapshot inicial.
+	ListarRevocadas(ctx context.Context) ([]string, error)
+	// ObtenerSesion consulta una sesión puntual tras 15 s sin frescura.
+	ObtenerSesion(ctx context.Context, sesionID string) (revocada bool, err error)
+}

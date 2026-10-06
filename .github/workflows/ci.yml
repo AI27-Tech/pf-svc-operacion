@@ -1,0 +1,74 @@
+# CI de pf-svc-operacion. Ramas de repo-convention.
+#
+# Los repos AI27-Tech/* son privados; resolver módulos exige el secreto de repo
+# GH_PAT (PAT clásico con scope repo). GOPRIVATE evita la validación contra
+# sum.golang.org.
+name: ci
+
+on:
+  push:
+    branches: [pf-op-m, pf-op-d, pf-op-q]
+  pull_request:
+    branches: [pf-op-m, pf-op-d, pf-op-q]
+
+permissions:
+  contents: read
+
+env:
+  GOPRIVATE: github.com/AI27-Tech/*
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: Verificar que el secreto GH_PAT existe
+        run: |
+          if [ -z "${GH_PAT}" ]; then
+            echo "ERROR: falta el secreto de repo GH_PAT (PAT con lectura de los repos privados AI27-Tech/*)."
+            exit 1
+          fi
+      - name: Configurar acceso a módulos privados
+        run: git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+      - name: Descargar dependencias
+        run: go mod download
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      # I5: cmd/api compila y arranca standalone sin core.
+      - name: Build de cmd/api (standalone)
+        run: go build ./cmd/api
+
+  arch-test:
+    runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/AI27-Tech/*
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+      - name: Verificar que el secreto GH_PAT existe
+        run: |
+          if [ -z "${GH_PAT}" ]; then
+            echo "ERROR: falta el secreto de repo GH_PAT."
+            exit 1
+          fi
+      - name: Configurar acceso a módulos privados
+        run: git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+      # operacion tiene DOS aristas declaradas: operacion -> catalogos y
+      # operacion -> identidad (restringida a revocación, DEC-051). arch-test
+      # verifica que no haya otras (00 regla 5).
+      - name: arch-test
+        run: go run github.com/AI27-Tech/pf-pkg-platform-go/tools/arch-test@v0.1.0 .
