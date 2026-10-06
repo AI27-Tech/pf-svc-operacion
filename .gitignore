@@ -1,0 +1,8 @@
+# Binarios compilados
+/api
+/operacion
+*.out
+
+# go.work local no versionado (00 regla 7)
+go.work
+go.work.sum
