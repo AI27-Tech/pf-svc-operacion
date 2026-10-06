@@ -9,19 +9,25 @@ deployable `core`.
 Estado: **scaffolding inicial** (prompt 04). Estructura y cableado; sin lógica
 de negocio real todavía. Contrato fijado en `pf-pkg-contracts` v0.1.0-tracer.3.
 
-## Cuatro esquemas, cuatro roles, una transacción
+## Cinco esquemas, cinco roles, una transacción
 
-`operacion` es el único servicio con cuatro esquemas (`viajes`, `asignacion`,
-`bitacora`, `auditoria`) y cuatro roles (`op_viajes`, `op_asignacion`,
-`op_bitacora`, `op_auditoria`), cada uno con su pool. Comparten la **transacción**,
-no el acoplamiento: la asignación muta la reserva, el estado del viaje y la
-auditoría en una sola operación de negocio (ADR 31; P2). Repartirla entre
-servicios la convierte en sagas que sobrevenden.
+`operacion` es el único servicio con cinco esquemas (`viajes`, `asignacion`,
+`bitacora`, `auditoria`, `roster`) y cinco roles (`op_viajes`, `op_asignacion`,
+`op_bitacora`, `op_auditoria`, `op_roster`), cada uno con su pool. Comparten la
+**transacción**, no el acoplamiento: la asignación muta la reserva, el estado del
+viaje y la auditoría en una sola operación de negocio (ADR 31; P2). Repartirla
+entre servicios la convierte en sagas que sobrevenden.
+
+El `roster` de `unidades` (composición vehículo+custodios y disponibilidad,
+administrado por el `Jefe Operativo`) vive en su propio esquema (ADR 33): es
+dato que cambia poco y tiene su propia administración, separado del libro
+caliente de reservas (`asignacion`) y del agregado del viaje (`viajes`).
 
 **La única excepción de GRANT cruzado del sistema entero** es `op_asignacion`,
-que recibe `USAGE` sobre los cuatro esquemas de `operacion` (nunca sobre
-`catalogos`). Está escrita y comentada en `migrations/asignacion/0001_init.sql`.
-Ningún otro rol de ningún otro servicio puede introducir otra sin un ADR.
+que recibe `USAGE` sobre los otros esquemas de `operacion` —`viajes`, `bitacora`,
+`auditoria` (escritura) y `roster` (solo lectura, ADR 33)—, nunca sobre
+`catalogos`. Está escrita y comentada en las migraciones. Ningún otro rol de
+ningún otro servicio puede introducir otra sin un ADR.
 
 ## Piezas clave
 
@@ -37,8 +43,14 @@ Ningún otro rol de ningún otro servicio puede introducir otra sin un ADR.
 - **Auditoría como interceptor** (`internal/auditoria`): una función que envuelve
   la escritura y recibe la tx abierta, nunca un cliente omitible. El registro se
   escribe en la misma tx que el cambio (P3).
-- **Outbox por esquema productor:** `viajes` y `asignacion` tienen outbox y
-  worker (con su rol); `bitacora` y `auditoria` no publican eventos.
+- **Outbox único por agregado (ADR 35):** todos los eventos `viaje.*` salen de
+  un solo outbox en `viajes`; `asignacion` escribe `viaje.asignado`/`reasignado`
+  ahí dentro de su transacción (vía la excepción de GRANT). `bitacora` y
+  `auditoria` no publican eventos.
+- **Consumidores idempotentes en memoria (ADR 34):** `catalogo.actualizado` y
+  `sesion.revocada` deduplican por `evento_id` en memoria; su efecto es en
+  memoria (caché / proyección de revocación reconstruida desde snapshot, ADR 26),
+  sin tabla `inbox_evento`.
 - **Aptitud informativa (DEC-055):** `AptitudRecursos` consulta aptitud pero
   **nunca gatea**. El único rechazo de asignación es la reserva fallida.
 
@@ -59,6 +71,7 @@ SERVICE_NAME=operacion HTTP_ADDR=:8080 \
   DB_ASIGNACION_URL="postgres://op_asignacion@localhost/ai27?sslmode=disable" \
   DB_BITACORA_URL="postgres://op_bitacora@localhost/ai27?sslmode=disable" \
   DB_AUDITORIA_URL="postgres://op_auditoria@localhost/ai27?sslmode=disable" \
+  DB_ROSTER_URL="postgres://op_roster@localhost/ai27?sslmode=disable" \
   CATALOGOS_BASE_URL="http://localhost:8081" \
   go run ./cmd/api
 ```
@@ -81,17 +94,17 @@ desalineado o ausente se reporta y **no se escribe a mano** (contrato primero).
 | Guarda `ningun_recurso_no_apto` / 409 `recurso_no_apto` | ⚠️ el contrato aún los trae | **NO se implementan** (DEC-055); se van en tracer.4 |
 | Rutas del roster de `unidades` (E1-HU-031) | ❌ ausentes | el roster no se scaffoldea (ver pendientes) |
 
-## Pendientes que NO se infieren (requieren decisión)
+## Decisiones de arquitectura resueltas (antes pendientes)
 
-- **Ubicación del roster de `unidades`:** ADR 31 lo pone en `operacion` pero
-  ninguna fuente fija esquema, tablas ni rutas. No se creó un quinto esquema ni
-  se eligió uno. **Preguntar antes de crear.**
-- **Ubicación de `inbox_evento`** de cada consumidor durable: ADR 29 lo exige
-  pero no fija en qué esquema/rol vive. **Preguntar antes de colocar.**
-- **Orden por agregado con dos outbox:** `viaje.*` sale de `viajes.outbox` y
-  `asignacion.outbox` con el mismo `viaje_id`; ADR 29 promete orden por agregado,
-  que con dos publishers independientes no está garantizado por construcción.
-  Observación para el Lead.
+Tres huecos que el scaffold inicial dejó abiertos se decidieron como ADRs:
+
+- **Roster de `unidades` → esquema `roster` + rol `op_roster`** (ADR 33, DEC-066).
+  `operacion` pasa a cinco esquemas; `op_asignacion` extiende su excepción de
+  GRANT con lectura de `roster`.
+- **Idempotencia de consumidores → dedup en memoria, sin `inbox_evento`**
+  (ADR 34, DEC-067). Enmienda acotada de ADR 29 para efectos en memoria.
+- **Eventos `viaje.*` → un solo outbox en `viajes`** (ADR 35, DEC-068).
+  `asignacion` deja de tener outbox. Enmienda acotada de ADR 29.
 
 ## Ramas
 

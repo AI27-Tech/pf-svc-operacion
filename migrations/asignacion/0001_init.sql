@@ -21,12 +21,16 @@ GRANT USAGE ON SCHEMA asignacion TO op_asignacion;
 ALTER DEFAULT PRIVILEGES IN SCHEMA asignacion
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO op_asignacion;
 
--- LA EXCEPCIÓN (operacion.md (e), §7.1): acotada a un rol y a la operación de
--- asignación. Permite escribir la transición del viaje y el registro de
--- auditoría en la misma tx que la reserva.
+-- LA EXCEPCIÓN (operacion.md (e), §7.1; ADR 33): acotada a un rol y a la
+-- operación de asignación. Permite escribir la transición del viaje, su evento
+-- en viajes.outbox (ADR 35) y el registro de auditoría en la misma tx que la
+-- reserva.
 GRANT USAGE ON SCHEMA viajes     TO op_asignacion;
 GRANT USAGE ON SCHEMA bitacora   TO op_asignacion;
 GRANT USAGE ON SCHEMA auditoria  TO op_asignacion;
+-- El USAGE de SOLO LECTURA sobre `roster` (la asignación lee la composición de
+-- la unidad antes de reservarla, ADR 33) se concede en roster/0001_init.sql,
+-- junto a la creación de ese esquema. Es la misma excepción, extendida.
 -- TODO(E0-T5): privilegios por tabla sobre esos esquemas (INSERT en
 -- viajes.transicion_viaje / viajes.outbox y auditoria.registro_auditoria),
 -- acotados a lo que el caso de uso de asignación necesita. No se amplían aquí.
@@ -75,32 +79,14 @@ CREATE TABLE IF NOT EXISTS asignacion.historia_asignacion (
 );
 
 -- ---------------------------------------------------------------------------
--- outbox — eventos viaje.asignado / viaje.reasignado (ADR 29). Clave de orden =
--- viaje_id. Cuando la asignación transiciona el viaje a ASIGNADO, el caso de uso
--- escribe también la fila de viaje.estado_cambiado en viajes.outbox dentro de
--- esta misma transacción (puede, por la excepción de GRANT).
+-- asignacion NO tiene outbox (ADR 35, DEC-068). Todos los eventos viaje.* salen
+-- de un solo outbox en el esquema `viajes`, para que ADR 29 cumpla el orden por
+-- agregado por construcción. Cuando la asignación transiciona el viaje a
+-- ASIGNADO, el caso de uso escribe viaje.asignado / viaje.reasignado en
+-- viajes.outbox dentro de ESTA misma transacción (puede, por la excepción de
+-- GRANT sobre `viajes`). Un solo outbox, un solo worker, un solo orden.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS asignacion.outbox (
-  id            BIGSERIAL   PRIMARY KEY,
-  evento_id     UUID        NOT NULL UNIQUE,
-  tipo          TEXT        NOT NULL,
-  version       INT         NOT NULL DEFAULT 1,
-  agregado_id   TEXT        NOT NULL,
-  sensibilidad  TEXT        NOT NULL DEFAULT 'amplia',
-  ocurrido_en   TIMESTAMPTZ NOT NULL,
-  payload       JSONB       NOT NULL,
-  trace_context JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  publicado     BOOLEAN     NOT NULL DEFAULT false,
-  publicado_en  TIMESTAMPTZ,
-  creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS outbox_pendientes_idx
-  ON asignacion.outbox (creado_en) WHERE publicado = false;
 
--- NOTA (para el Lead, no se resuelve en el scaffold): viaje.* sale de dos outbox
--- (viajes y asignacion) con el mismo viaje_id; ADR 29 promete orden por
--- agregado, que con dos publishers independientes no está garantizado por
--- construcción.
--- NOTA (pendiente, no inferir): el roster de unidades (ADR 31 §5, E1-HU-031) es
--- de operacion pero ninguna fuente fija en qué esquema vive ni sus rutas. No se
--- crea tabla de roster aquí.
+-- NOTA (pendiente, no inferir): los campos reales del roster de unidades viven
+-- en el esquema `roster` (ADR 33); su superficie HTTP de administración sigue
+-- pendiente de contrato (ola 1 / tracer.4).

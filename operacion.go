@@ -29,14 +29,15 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 )
 
-// Pools agrupa los cuatro pools, uno por rol/esquema (operacion.md (e)). Es el
-// único servicio con esta forma. Nunca se comparte un pool entre roles, aunque
-// los cuatro módulos compartan proceso y transacción (I1).
+// Pools agrupa los cinco pools, uno por rol/esquema (operacion.md (e), ADR 33).
+// Es el único servicio con esta forma. Nunca se comparte un pool entre roles,
+// aunque los módulos compartan proceso y transacción (I1).
 type Pools struct {
 	Viajes     *pgxpool.Pool // rol op_viajes
 	Asignacion *pgxpool.Pool // rol op_asignacion (la única excepción de GRANT cruzado)
 	Bitacora   *pgxpool.Pool // rol op_bitacora
 	Auditoria  *pgxpool.Pool // rol op_auditoria
+	Roster     *pgxpool.Pool // rol op_roster (roster de unidades, ADR 33)
 }
 
 // Deps agrupa los puertos de salida ya resueltos por la raíz.
@@ -72,16 +73,21 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	// mismos casos de uso que Consultas() (I3).
 }
 
-// Workers devuelve los workers embebidos (ADR 29 §6): un publisher de outbox por
-// esquema PRODUCTOR (viajes, asignacion) y los dos consumidores durables V1
-// (catalogo.actualizado, sesion.revocada). bitacora y auditoria no publican
-// eventos: no tienen outbox ni worker. Cada worker usa el rol y pool de SU
-// módulo; ninguno accede a varios esquemas.
+// Workers devuelve los workers embebidos (ADR 29 §6): UN publisher de outbox,
+// el del esquema `viajes` —que lleva todos los eventos viaje.* (ADR 35, DEC-068),
+// incluidos viaje.asignado/reasignado que asignacion escribe ahí— más los dos
+// consumidores durables V1 (catalogo.actualizado, sesion.revocada). asignacion,
+// bitacora y auditoria no tienen outbox ni worker. Cada worker usa el rol y pool
+// de su módulo; ninguno accede a varios esquemas.
 //
-// Scaffolding: hoy devuelve lista vacía. Los publishers se cablean cuando la
-// raíz inyecte el adaptador de bus (bus/memory en desarrollo; broker real en
+// Los dos consumidores deduplican por evento_id EN MEMORIA (ADR 34, DEC-067): su
+// efecto es en memoria (invalidar caché / proyección de revocación reconstruida
+// desde snapshot, ADR 26), así que no hay tabla inbox_evento.
+//
+// Scaffolding: hoy devuelve lista vacía. El publisher de viajes se cablea cuando
+// la raíz inyecte el adaptador de bus (bus/memory en desarrollo; broker real en
 // espera de ADR 32); los consumidores, con su suscripción durable propia
-// (DEC-057) y su inbox_evento (ubicación pendiente, ver README).
+// (DEC-057).
 func (m *Module) Workers() []worker.Worker {
 	return nil
 }

@@ -5,12 +5,14 @@
 // resuelve DENTRO de esta transacción, nunca con un candado en catalogos.
 //
 // Es el dueño de la ÚNICA excepción de GRANT cruzado del sistema: op_asignacion
-// tiene USAGE sobre viajes/bitacora/auditoria para escribir la transición a
-// ASIGNADO, su fila en viajes.outbox y el registro de auditoría en la MISMA
-// transacción que la reserva (P2). Nunca sobre catalogos.
+// tiene USAGE sobre viajes/bitacora/auditoria (y lectura sobre roster, ADR 33)
+// para escribir la transición a ASIGNADO, el evento viaje.asignado en
+// viajes.outbox y el registro de auditoría en la MISMA transacción que la
+// reserva (P2). Nunca sobre catalogos.
 //
-// Sub-módulo interno de operacion; su worker publica asignacion.outbox
-// (viaje.asignado, viaje.reasignado) con el rol op_asignacion.
+// Sub-módulo interno de operacion. NO tiene outbox propio (ADR 35, DEC-068):
+// escribe viaje.asignado/viaje.reasignado en viajes.outbox, el único outbox de
+// la familia viaje.*, para que ADR 29 cumpla el orden por agregado.
 //
 // Scaffolding: sin casos de uso todavía. La aptitud NO gatea (DEC-055): el único
 // rechazo de asignación es la reserva fallida (no hay unidad libre en la ventana).

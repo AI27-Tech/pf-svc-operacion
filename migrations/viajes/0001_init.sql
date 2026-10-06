@@ -80,8 +80,12 @@ CREATE INDEX IF NOT EXISTS transicion_por_viaje_idx
   ON viajes.transicion_viaje (viaje_id, cambiado_en);
 
 -- ---------------------------------------------------------------------------
--- outbox — eventos viaje.* (ADR 29). Escrita en la MISMA tx que el cambio (P17).
--- Refleja outbox.OutboxDDL de pf-pkg-platform-go. Clave de orden = viaje_id.
+-- outbox — el ÚNICO outbox de los eventos viaje.* (ADR 35, DEC-068). Lleva
+-- tanto los de este esquema (viaje.estado_cambiado, viaje.cerrado, …) como los
+-- de asignacion (viaje.asignado, viaje.reasignado), que el caso de uso de
+-- asignacion escribe aquí dentro de su propia transacción vía la excepción de
+-- GRANT. Escrita en la MISMA tx que el cambio (P17). Clave de orden = viaje_id.
+-- Refleja outbox.OutboxDDL de pf-pkg-platform-go.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS viajes.outbox (
   id            BIGSERIAL   PRIMARY KEY,

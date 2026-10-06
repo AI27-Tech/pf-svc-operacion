@@ -30,6 +30,7 @@ const (
 	envDBAsignacion  = "DB_ASIGNACION_URL"
 	envDBBitacora    = "DB_BITACORA_URL"
 	envDBAuditoria   = "DB_AUDITORIA_URL"
+	envDBRoster      = "DB_ROSTER_URL"
 	envCatalogosBase = "CATALOGOS_BASE_URL"
 )
 
@@ -43,7 +44,7 @@ func main() {
 func run() error {
 	ctx := context.Background()
 
-	cfg, err := config.Load(envDBViajes, envDBAsignacion, envDBBitacora, envDBAuditoria, envCatalogosBase)
+	cfg, err := config.Load(envDBViajes, envDBAsignacion, envDBBitacora, envDBAuditoria, envDBRoster, envCatalogosBase)
 	if err != nil {
 		return err
 	}
@@ -82,6 +83,11 @@ func run() error {
 		return err
 	}
 	defer auditoria.Close()
+	roster, err := pgxpool.New(ctx, "op_roster", os.Getenv(envDBRoster))
+	if err != nil {
+		return err
+	}
+	defer roster.Close()
 
 	// TODO(operacion): aplicar migrations.FS con cada rol dueño (viajes,
 	// bitacora, auditoria primero; asignacion al final por el GRANT de excepción)
@@ -98,6 +104,7 @@ func run() error {
 		Asignacion: asignacion,
 		Bitacora:   bitacora,
 		Auditoria:  auditoria,
+		Roster:     roster,
 	}, operacion.Deps{Aptitud: aptitud})
 	if err != nil {
 		return err
@@ -109,6 +116,7 @@ func run() error {
 	srv.Registry().RegisterCheck("db_asignacion", asignacion.CheckFunc())
 	srv.Registry().RegisterCheck("db_bitacora", bitacora.CheckFunc())
 	srv.Registry().RegisterCheck("db_auditoria", auditoria.CheckFunc())
+	srv.Registry().RegisterCheck("db_roster", roster.CheckFunc())
 
 	srv.MarkReady()
 	return srv.Start(ctx)

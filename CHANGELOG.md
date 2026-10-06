@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## 2026:10:06 15:30
+
+**Resumen:** Se aplicaron al scaffold las decisiones de arquitectura ADR 33/34/35 (DEC-066/067/068), que resuelven tres huecos que el esqueleto inicial había dejado abiertos.
+
+**Cambios:**
+- **ADR 33 (roster en esquema propio):** se agregó `migrations/roster/0001_init.sql` (esquema `roster` + rol `op_roster`, tablas `unidad` y `unidad_custodio`). `operacion` pasa a **cinco** esquemas/roles. La excepción de GRANT de `op_asignacion` se extiende con `USAGE` de solo lectura sobre `roster`. Se agregó el pool `Roster` a `Pools`, el quinto pool y check de readiness a `cmd/api`, y se amplió el embed de `migrations.go` con el orden de aplicación (roster antes de asignacion).
+- **ADR 34 (idempotencia en memoria):** `internal/consumidores/doc.go` ahora declara dedup por `evento_id` en memoria y elimina el pendiente de ubicación de `inbox_evento`; no se crea tabla de inbox para los dos consumidores (efecto en memoria, ADR 26).
+- **ADR 35 (outbox único por agregado):** se eliminó `asignacion.outbox`; todos los `viaje.*` salen de `viajes.outbox`, donde `asignacion` escribe `viaje.asignado`/`reasignado` vía la excepción de GRANT. Se actualizaron los comentarios de las migraciones de `viajes` y `asignacion`, el doc de `internal/asignacion` y el `Workers()` de `operacion.go`.
+- README: "cuatro esquemas" → cinco; sección de decisiones resueltas (antes "pendientes que no se infieren"); `DB_ROSTER_URL` en el ejemplo standalone.
+
+**Verificado:** build `-mod=readonly`, vet, test (interceptor P3), build de `cmd/api`, arch-test OK, gofmt limpio.
+
+**Nota:** los ADR y las entradas de decision-log (DEC-066/067/068) viven en el workspace de producto (`docs/adr/0033..0035`, `.kiro/steering/decision-log.md`), no en este repo.
+
+**Archivos modificados:**
+- `migrations/roster/0001_init.sql` (nuevo)
+- `migrations/asignacion/0001_init.sql`
+- `migrations/viajes/0001_init.sql`
+- `migrations/migrations.go`
+- `operacion.go`
+- `internal/consumidores/doc.go`
+- `internal/asignacion/doc.go`
+- `cmd/api/main.go`
+- `README.md`
+
 ## 2026:10:06 14:01
 
 **Resumen:** Esqueleto inicial del módulo `operacion` (prompt 04, ADR 31, DEC-050). Dominio; cuatro esquemas bajo una transacción. Sin lógica de negocio real todavía. Contrato fijado en `pf-pkg-contracts` v0.1.0-tracer.3.
