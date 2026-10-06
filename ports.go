@@ -2,9 +2,19 @@ package operacion
 
 import (
 	"context"
+	"time"
 
 	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
 )
+
+// PresupuestoAptitud es el presupuesto de tiempo de la arista síncrona a
+// catalogos. Se exporta JUNTO AL PUERTO AptitudRecursos porque la obligación I3
+// (ADR 17) exige que todos sus adaptadores —el HTTP de este repo y el EN PROCESO
+// de pf-svc-core— usen EXACTAMENTE el mismo valor. core lo lee de aquí; no
+// duplica el número (prompt 09, I3 obligación #1). Si algún día debe
+// configurarse por despliegue, pasa a Deps/config conservando este valor como
+// default común.
+const PresupuestoAptitud = 2 * time.Second
 
 // Puertos de salida que declara operacion COMO CONSUMIDOR (regla 2 de 00-indice,
 // ADR 17). La interfaz la declara el consumidor para que pf-svc-core la

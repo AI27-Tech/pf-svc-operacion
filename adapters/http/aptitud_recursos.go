@@ -9,22 +9,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	operacion "github.com/AI27-Tech/pf-svc-operacion"
 )
 
-// presupuestoAptitud es el presupuesto de tiempo de la arista a catalogos. El
-// adaptador en proceso de core debe usar EXACTAMENTE el mismo valor (I3); por
-// eso se exporta junto al adaptador. TODO(operacion): si este valor debe
-// configurarse por despliegue, moverlo a Deps/config; hoy es el default común.
-const presupuestoAptitud = 2 * time.Second
-
 // AptitudRecursosHTTP implementa operacion.AptitudRecursos con el cliente
-// generado de catalogos. Respeta el presupuesto de tiempo y traduce los errores
-// a la taxonomía de la plataforma, igual que debe hacer el adaptador en proceso.
+// generado de catalogos. Respeta el presupuesto de tiempo (operacion.PresupuestoAptitud,
+// el mismo valor que debe usar el adaptador en proceso de core, I3) y traduce
+// los errores a la taxonomía de la plataforma, igual que debe hacer el adaptador
+// en proceso.
 type AptitudRecursosHTTP struct {
 	cli *catalogos.ClientWithResponses
 }
@@ -46,7 +41,7 @@ func NewAptitudRecursosHTTP(baseURL string, doer catalogos.HttpRequestDoer) (*Ap
 
 // AptitudUnidad devuelve la aptitud informativa de una unidad-átomo (DEC-055).
 func (a *AptitudRecursosHTTP) AptitudUnidad(ctx context.Context, unidadID catalogos.Id) (*catalogos.Aptitud, error) {
-	ctx, cancel := context.WithTimeout(ctx, presupuestoAptitud)
+	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
 	defer cancel()
 
 	resp, err := a.cli.AptitudUnidadWithResponse(ctx, unidadID, &catalogos.AptitudUnidadParams{})
@@ -58,7 +53,7 @@ func (a *AptitudRecursosHTTP) AptitudUnidad(ctx context.Context, unidadID catalo
 
 // AptitudCustodio devuelve la aptitud informativa de un custodio (DEC-055).
 func (a *AptitudRecursosHTTP) AptitudCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Aptitud, error) {
-	ctx, cancel := context.WithTimeout(ctx, presupuestoAptitud)
+	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
 	defer cancel()
 
 	resp, err := a.cli.AptitudCustodioWithResponse(ctx, custodioID, &catalogos.AptitudCustodioParams{})
