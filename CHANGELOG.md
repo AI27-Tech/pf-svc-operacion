@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## 2026:10:07 17:15
+
+**Resumen:** Se amplía `operacion.Consultas()` a los tres métodos que `bff` consume (`CrearViaje`, `ListarViajes`, `ObtenerViaje`), con la forma exacta de `bff.OperacionPort`. Brecha detectada al cablear core: la fachada entrante solo exponía `ObtenerViaje` y devolvía `*Viaje`, no `*ViajeDetalle`; sin los tres, core no podía construir el adaptador en proceso `bff → operacion`.
+
+**Para quién:** para `core`, que compone bff sobre operacion. Antes `bff.New(...)` no se podía cablear porque su puerto `Operacion` no tenía implementación posible.
+
+**Cambios:**
+- `operacion.go`: `ConsultasAPI` pasa de un método a tres (`CrearViaje`, `ListarViajes`, `ObtenerViaje`). `ObtenerViaje` ahora devuelve `*ViajeDetalle` (no `*Viaje`): bff compone los hitos a partir del detalle, que incluye las condiciones activas (E2-T2/E2-T3). Las escrituras internas (transición, asignación) no entran: no son arista de bff (bff.md (f)).
+- `consultas_test.go` (nuevo): prueba de conformación de superficie. Replica la firma de `bff.OperacionPort` (operacion no puede importar bff) y afirma que `ConsultasAPI` la satisface.
+
+**Alcance / brecha reportada:** el servicio de dominio sigue siendo scaffold; los tres métodos devuelven "no implementado" en runtime. La fachada fija la forma tipada para que core cablee el adaptador con paridad I3, no entrega la lógica de viajes.
+
+**Verificado:** gofmt limpio, `go vet ./...`, `go build ./...`, `go test ./...`, build `-mod=readonly`, arch-test@v0.1.1 OK.
+
+**Archivos modificados:**
+- `operacion.go`
+- `consultas_test.go` (nuevo)
+
 ## 2026:10:07 16:25
 
 **Resumen:** Se exporta `PresupuestoRevocacion` para la arista restringida a `identidad`, por la misma obligación I3 que `PresupuestoAptitud`. Brecha detectada al cablear el prompt 09: el adaptador EN PROCESO de `pf-svc-core` para la revocación no tenía de dónde leer el presupuesto, porque el consumidor no lo exportaba.

@@ -101,16 +101,37 @@ func (m *Module) Consultas() ConsultasAPI {
 
 // ConsultasAPI es la superficie síncrona de operacion. Cada método corresponde
 // 1:1 a un operationId presente en operacion.yaml de la versión fijada (00
-// regla 6). Hoy expone lecturas de viaje; las escrituras (transición,
-// asignación) se agregan con su caso de uso.
+// regla 6): crearViaje, listarViajes y obtenerViaje. Su forma es exactamente el
+// puerto que bff declara (bff.OperacionPort): crear un viaje, listar por alcance
+// y leer el detalle para la composición de hitos (ADR 27).
+//
+// obtenerViaje devuelve ViajeDetalle (no Viaje): bff compone los hitos a partir
+// del detalle, que incluye las condiciones activas (E2-T2/E2-T3). Las escrituras
+// internas (transición, asignación) NO entran aquí: no son arista de bff
+// (bff.md (f)); se agregan a sus propios handlers cuando se implementen.
+//
+// SCAFFOLD: el servicio de dominio todavía no existe, así que los tres métodos
+// devuelven "no implementado" en runtime. La fachada fija la FORMA tipada con el
+// contrato para que core cablee el adaptador en proceso con paridad I3; la
+// lógica real se agrega con los casos de uso de viajes/asignacion.
 type ConsultasAPI interface {
-	ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
+	CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error)
+	ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error)
+	ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error)
 }
 
 type consultas struct {
 	m *Module
 }
 
-func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error) {
+func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error) {
+	return nil, errNoImplementado("CrearViaje")
+}
+
+func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
+	return nil, errNoImplementado("ListarViajes")
+}
+
+func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
 	return nil, errNoImplementado("ObtenerViaje")
 }
