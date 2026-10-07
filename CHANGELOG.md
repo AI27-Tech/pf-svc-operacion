@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026:10:07 16:25
+
+**Resumen:** Se exporta `PresupuestoRevocacion` para la arista restringida a `identidad`, por la misma obligación I3 que `PresupuestoAptitud`. Brecha detectada al cablear el prompt 09: el adaptador EN PROCESO de `pf-svc-core` para la revocación no tenía de dónde leer el presupuesto, porque el consumidor no lo exportaba.
+
+**Cambios:**
+- `ports.go`: se agrega `PresupuestoRevocacion` (`2 * time.Second`) exportado, junto al puerto `Revocacion`. `core` lo lee de aquí para el adaptador en proceso de revocación, en vez de duplicar el número (I3, ADR 17). El comentario distingue este presupuesto (una llamada puntual) del umbral de frescura del canal (15 s / 30 s, ADR 26), que es independiente.
+
+**Verificado:** gofmt limpio, `go vet ./...`, `go build ./...`, `go test ./...`, build `-mod=readonly`, arch-test@v0.1.1 OK.
+
+**Archivos modificados:**
+- `ports.go`
+
 ## 2026:10:05 (hora local)
 
 **Resumen:** Se exporta el presupuesto de tiempo de la arista a `catalogos` para que el adaptador EN PROCESO de `pf-svc-core` pueda leer el mismo valor (I3). Brecha detectada al cablear el prompt 09: el presupuesto estaba como `const` privada dentro de `adapters/http`, inalcanzable para `core`.

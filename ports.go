@@ -61,3 +61,17 @@ type Revocacion interface {
 	// ObtenerSesion consulta una sesión puntual tras 15 s sin frescura.
 	ObtenerSesion(ctx context.Context, sesionID string) (revocada bool, err error)
 }
+
+// PresupuestoRevocacion es el presupuesto de tiempo de la arista restringida a
+// identidad (puerto Revocacion). Se exporta JUNTO AL PUERTO por la obligación I3
+// (ADR 17): el adaptador HTTP de este repo y el EN PROCESO de pf-svc-core deben
+// usar EXACTAMENTE el mismo valor; core lo lee de aquí y no duplica el número.
+//
+// Es el presupuesto de UNA llamada puntual (snapshot al arrancar o fallback
+// ObtenerSesion), no el umbral de frescura del canal de revocación: ese umbral
+// (15 s sin frescura antes del fallback, 30 s de corte máximo) lo fija ADR 26 y
+// es independiente de cuánto espera una sola llamada HTTP. El valor concreto no
+// está en las fuentes; 2 s es el default común, igual que PresupuestoAptitud, y
+// no es un número de negocio aprobado. Si debe configurarse por despliegue, pasa
+// a Deps/config conservando este valor como default.
+const PresupuestoRevocacion = 2 * time.Second
