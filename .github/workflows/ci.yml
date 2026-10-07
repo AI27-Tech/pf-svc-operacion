@@ -71,4 +71,4 @@ jobs:
       # operacion -> identidad (restringida a revocación, DEC-051). arch-test
       # verifica que no haya otras (00 regla 5).
       - name: arch-test
-        run: go run github.com/AI27-Tech/pf-pkg-platform-go/tools/arch-test@v0.1.0 .
+        run: go run github.com/AI27-Tech/pf-pkg-platform-go/tools/arch-test@v0.1.1 .
