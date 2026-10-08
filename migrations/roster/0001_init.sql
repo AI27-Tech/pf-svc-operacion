@@ -19,12 +19,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA roster
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO op_roster;
 
 -- La asignación LEE el roster para saber qué es una unidad antes de reservarla
--- (ADR 33): se extiende la excepción de GRANT existente de op_asignacion con
--- USAGE de SOLO LECTURA sobre roster. No es una excepción nueva: es la misma de
--- asignacion/0001_init.sql, extendida al quinto esquema. Nunca alcanza catalogos.
-GRANT USAGE ON SCHEMA roster TO op_asignacion;
--- TODO(E0-T5): privilegio por tabla acotado a SELECT para op_asignacion sobre
--- las tablas de roster. No se amplía más aquí.
+-- (ADR 33). El GRANT USAGE de op_asignacion sobre este esquema se movió a
+-- roster/0002_grants.sql (fase de grants), junto al SELECT por tabla: así ningún
+-- 0001 referencia un rol de otro esquema y la fase de estructura no depende del
+-- orden de creación de roles (ver nota de revisión E0-T5).
 
 -- ---------------------------------------------------------------------------
 -- unidad — paquete pre-armado: un vehículo de AI27 (coche o moto) con sus
