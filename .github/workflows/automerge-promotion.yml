@@ -1,14 +1,15 @@
 # =============================================================================
 # Auto-merge de PRs de promoción entre ramas de larga vida (repo-convention).
 #
-# El flujo de AI27 es: feature -> *-d -> *-q -> *-m. La revisión real ocurre en
-# feature -> *-d. Las promociones *-d -> *-q y *-q -> *-m no se re-revisan: este
-# workflow las fusiona solo cuando CI pasa en verde.
+# El flujo de AI27 es: feature -> *-d -> *-q -> *-m.
+#   - feature -> *-d : lo revisas y fusionas tú (revisión real).
+#   - *-d -> *-q     : PR siempre abierto y resumido (promotion-pr-dq.yml), pero
+#                      lo fusionas tú a mano. NO se auto-fusiona.
+#   - *-q -> *-m     : esto SÍ se auto-fusiona cuando CI pasa en verde.
 #
-# Qué cuenta como "promoción" (y por tanto se auto-fusiona):
-#   - head termina en  -d  y base termina en  -q
+# Qué cuenta como "promoción auto-fusionable" (lo único que toca este workflow):
 #   - head termina en  -q  y base termina en  -m
-# Cualquier otro PR (incluido feature -> *-d) se ignora: lo revisas tú.
+# Cualquier otro PR (feature -> *-d, y *-d -> *-q) se ignora: lo manejas tú.
 #
 # El merge usa --merge (merge commit), no squash/rebase: squash reescribiría la
 # historia y rompería el diff de la siguiente promoción entre ramas de larga vida.
@@ -72,15 +73,15 @@ jobs:
               echo "::endgroup::"; continue
             fi
 
-            # 2) ¿Es una promoción? Derivado del sufijo de rama, sin prefijos.
+            # 2) ¿Es la promoción auto-fusionable q->m? Derivado del sufijo.
+            #    d->q queda fuera a propósito: esa la fusionas tú a mano.
             promo=no
             case "$head:$base" in
-              *-d:*-q) promo=yes ;;
               *-q:*-m) promo=yes ;;
             esac
 
             if [ "$promo" != "yes" ]; then
-              echo "PR #$pr ($head -> $base) no es promoción; se revisa a mano. Se omite."
+              echo "PR #$pr ($head -> $base) no es promoción q->m; lo manejas tú. Se omite."
               echo "::endgroup::"; continue
             fi
 
