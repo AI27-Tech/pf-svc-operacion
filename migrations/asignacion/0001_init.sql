@@ -24,16 +24,14 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA asignacion
 -- LA EXCEPCIÓN (operacion.md (e), §7.1; ADR 33): acotada a un rol y a la
 -- operación de asignación. Permite escribir la transición del viaje, su evento
 -- en viajes.outbox (ADR 35) y el registro de auditoría en la misma tx que la
--- reserva.
-GRANT USAGE ON SCHEMA viajes     TO op_asignacion;
-GRANT USAGE ON SCHEMA bitacora   TO op_asignacion;
-GRANT USAGE ON SCHEMA auditoria  TO op_asignacion;
--- El USAGE de SOLO LECTURA sobre `roster` (la asignación lee la composición de
--- la unidad antes de reservarla, ADR 33) se concede en roster/0001_init.sql,
--- junto a la creación de ese esquema. Es la misma excepción, extendida.
--- TODO(E0-T5): privilegios por tabla sobre esos esquemas (INSERT en
--- viajes.transicion_viaje / viajes.outbox y auditoria.registro_auditoria),
--- acotados a lo que el caso de uso de asignación necesita. No se amplían aquí.
+-- reserva. El USAGE de esquema y los privilegios por tabla de esta excepción se
+-- otorgan en la FASE de grants, desde cada esquema destino:
+--   viajes/0002_grants.sql     — USAGE + INSERT en transicion_viaje/outbox, UPDATE/SELECT en viaje
+--   auditoria/0002_grants.sql  — USAGE + INSERT en registro_auditoria
+--   roster/0002_grants.sql     — USAGE + SELECT en unidad/unidad_custodio
+-- Se concentran ahí (no aquí) para que ningún 0001 referencie un rol de otro
+-- esquema y la fase de estructura no dependa del orden de creación de roles.
+-- op_asignacion NUNCA recibe nada sobre catalogos: el acceso cruzado falla en la base.
 
 -- Extensión para combinar `=` y `&&` en un índice GiST (restricción de exclusión).
 CREATE EXTENSION IF NOT EXISTS btree_gist;
