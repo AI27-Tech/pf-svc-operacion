@@ -38,6 +38,25 @@ func DSN(t *testing.T) string {
 	return dsn
 }
 
+// Serializar toma un lock de sesión de Postgres (pg_advisory_lock) para que las
+// pruebas de integración de DISTINTOS paquetes, que comparten una sola base, no
+// corran a la vez y se pisen el esquema (go test corre los paquetes en paralelo).
+// El lock se libera al cerrar la conexión dedicada, en el Cleanup de la prueba.
+func Serializar(t *testing.T, ctx context.Context) {
+	t.Helper()
+	conn, err := pgx.Connect(ctx, DSN(t))
+	if err != nil {
+		t.Fatalf("dbtest: conectar para serializar: %v", err)
+	}
+	// Clave arbitraria pero COMPARTIDA por todas las pruebas de integración de
+	// operacion; cualquier otra que toque la misma base debe tomar esta misma.
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock(727224)"); err != nil {
+		_ = conn.Close(ctx)
+		t.Fatalf("dbtest: tomar lock de serialización: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(ctx) }) // cerrar la conexión libera el lock
+}
+
 // AdminConn abre una conexión de administración para crear o eliminar roles y
 // esquemas. El llamador la cierra con la función devuelta.
 func AdminConn(t *testing.T, ctx context.Context) (*pgx.Conn, func()) {
@@ -60,11 +79,16 @@ func Exec(t *testing.T, ctx context.Context, conn *pgx.Conn, sql string) {
 
 // PoolAs abre un pool que asume el rol dado en cada conexión (SET ROLE), de modo
 // que los privilegios efectivos sean los del rol y no los del admin que lo abrió.
-func PoolAs(t *testing.T, ctx context.Context, role string) (*pgxpool.Pool, func()) {
+// searchPath, si no está vacío, se fija por conexión como en producción (p. ej.
+// "viajes" para que el Publisher de outbox resuelva la tabla sin calificar).
+func PoolAs(t *testing.T, ctx context.Context, role, searchPath string) (*pgxpool.Pool, func()) {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig(DSN(t))
 	if err != nil {
 		t.Fatalf("dbtest: parsear DSN: %v", err)
+	}
+	if searchPath != "" {
+		cfg.ConnConfig.RuntimeParams["search_path"] = searchPath
 	}
 	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
 		_, err := c.Exec(ctx, "SET ROLE "+quoteIdent(role))
