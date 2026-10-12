@@ -22,6 +22,7 @@ package operacion
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
@@ -30,7 +31,9 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
+	"github.com/google/uuid"
 )
 
 // Pools agrupa los cinco pools, uno por rol/esquema (operacion.md (e), ADR 33).
@@ -51,36 +54,117 @@ type Deps struct {
 	// Revocacion es la arista restringida a identidad (DEC-051). Opcional en el
 	// esqueleto; sin ella, la autorización corre sin proyección de tombstones.
 	Revocacion Revocacion
+	// Verificador autentica las rutas protegidas que operacion monta por sí misma
+	// (como bff): la interfaz común Routes(mux) no lleva verificador, así que el
+	// módulo se autentica solo. Si es nil, no se monta ninguna ruta protegida (no
+	// se crea un endpoint sin autenticar). La raíz lo inyecta (el autenticador real
+	// o el stub de desarrollo).
+	Verificador auth.Authenticator
 }
 
 // Module es la instancia construida del módulo operacion.
 type Module struct {
-	pools  Pools
-	deps   Deps
-	viajes *viajes.Servicio
-	// Aquí vivirán los demás casos de uso (asignacion, bitacora) al implementarse.
+	pools      Pools
+	deps       Deps
+	viajes     *viajes.Servicio
+	asignacion *asignacion.Servicio
+	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
 
 // New recibe los pools por rol y los puertos ya resueltos. No lee entorno
 // (00 regla 4): la raíz cablea todo. Construye el publicador de outbox y el
 // caso de uso de viajes sobre el pool del rol op_viajes.
 func New(p Pools, d Deps) (*Module, error) {
+	pub := outbox.NewPublisher()
 	return &Module{
-		pools:  p,
-		deps:   d,
-		viajes: viajes.NewServicio(p.Viajes, outbox.NewPublisher()),
+		pools:      p,
+		deps:       d,
+		viajes:     viajes.NewServicio(p.Viajes, pub),
+		asignacion: asignacion.NewServicio(p.Asignacion, pub),
 	}, nil
 }
 
 // Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado.
-// Scaffolding: hoy no monta rutas de negocio. Se agregan una a una conforme se
-// implementen los casos de uso, y SOLO las presentes en operacion.yaml de la
-// versión fijada. Las guardas y el 409 por aptitud NO se montan (DEC-055),
-// aunque el contrato de tracer.3 todavía los traiga.
+//
+// Monta SOLO las rutas internas que bff no proxea (hoy: transicionar un viaje).
+// crear/listar/obtener NO se montan aquí: los sirve bff vía Consultas() en core,
+// y montarlos también provocaría una colisión de patrón en el mux.
+//
+// operacion se autentica a sí misma (como bff): la interfaz común Routes(mux) no
+// lleva verificador, así que se envuelve cada ruta protegida con el verificador
+// de Deps. Sin verificador no se monta nada (nunca un endpoint sin autenticar).
+// La consulta de revocación va nil por ahora (la proyección de tombstones de
+// operacion es DEC-057/058, aparte): se verifica la firma del token, no el
+// tombstone.
 func (m *Module) Routes(mux *http.ServeMux) {
-	// TODO(operacion): montar handlers de crearViaje, transicionarViaje,
-	// asignarRecursos, bitacora, incidencias y auditoria, delegando en los
-	// mismos casos de uso que Consultas() (I3).
+	if m.deps.Verificador == nil {
+		return
+	}
+	protegido := auth.Middleware(m.deps.Verificador, nil)
+	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
+	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
+}
+
+// handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
+// destino y la causa del cuerpo (TransicionEntrada) y delega en el caso de uso de
+// viajes, que es la única autoridad de transición.
+func (m *Module) handleTransicionar(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.TransicionEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	v, err := m.viajes.Transicionar(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, v)
+}
+
+// handleAsignar atiende POST /api/v1/viajes/{id}/asignacion: lee las unidades de
+// la escolta (AsignacionEntrada) y delega en el caso de uso de asignación, que
+// reserva + transiciona + audita en una transacción indivisible.
+func (m *Module) handleAsignar(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.AsignacionEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	a, err := m.asignacion.Asignar(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, a)
+}
+
+// escribirJSON serializa v como respuesta JSON con el status dado.
+func escribirJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// escribirError traduce un error de la taxonomía de la plataforma al Error del
+// contrato y a su status HTTP, reusando el mapeo de la plataforma.
+func escribirError(w http.ResponseWriter, err error) {
+	cat := platformerrors.AsCategory(err)
+	escribirJSON(w, cat.HTTPStatus(), operclient.Error{Codigo: cat.String(), Mensaje: err.Error()})
 }
 
 // Workers devuelve los workers embebidos (ADR 29 §6): UN publisher de outbox,
