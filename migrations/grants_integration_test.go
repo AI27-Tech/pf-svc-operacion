@@ -28,6 +28,8 @@ func TestGrantsPorTabla(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	dbtest.Serializar(t, ctx) // no correr a la vez que otras pruebas de BD
+
 	admin, closeAdmin := dbtest.AdminConn(t, ctx)
 	defer closeAdmin()
 
@@ -78,7 +80,7 @@ func TestGrantsPorTabla(t *testing.T) {
 	}
 
 	// --- op_asignacion: la excepción. Debe poder lo justo de su transacción. ---
-	poolAsig, closeAsig := dbtest.PoolAs(t, ctx, "op_asignacion")
+	poolAsig, closeAsig := dbtest.PoolAs(t, ctx, "op_asignacion", "")
 	defer closeAsig()
 
 	// Puede INSERT en viajes.transicion_viaje (escribe la transición).
@@ -184,7 +186,7 @@ func TestGrantsPorTabla(t *testing.T) {
 		"op_asignacion NO debe alcanzar el esquema catalogos")
 
 	// --- op_auditoria: probatorio, append-only. INSERT sí, DELETE no. ---
-	poolAud, closeAud := dbtest.PoolAs(t, ctx, "op_auditoria")
+	poolAud, closeAud := dbtest.PoolAs(t, ctx, "op_auditoria", "")
 	defer closeAud()
 	mustExec(t, ctx, poolAud,
 		`INSERT INTO auditoria.registro_auditoria (modulo, accion) VALUES ('viajes', 'transicionar')`,
@@ -199,7 +201,7 @@ func TestGrantsPorTabla(t *testing.T) {
 		"op_auditoria NO debe poder actualizar (append-only)")
 
 	// --- op_viajes: dueño de viajes, pero aislado de los demás esquemas. ---
-	poolViajes, closeViajes := dbtest.PoolAs(t, ctx, "op_viajes")
+	poolViajes, closeViajes := dbtest.PoolAs(t, ctx, "op_viajes", "")
 	defer closeViajes()
 	viajeID := "55555555-5555-5555-5555-555555555555"
 	mustExec(t, ctx, poolViajes,
@@ -242,7 +244,7 @@ func TestGrantsPorTabla(t *testing.T) {
 		"op_viajes NO debe poder leer el esquema de asignacion")
 
 	// --- op_bitacora: entrada append-only; incidencia se cierra por marca. ---
-	poolBit, closeBit := dbtest.PoolAs(t, ctx, "op_bitacora")
+	poolBit, closeBit := dbtest.PoolAs(t, ctx, "op_bitacora", "")
 	defer closeBit()
 	mustExec(t, ctx, poolBit,
 		`INSERT INTO bitacora.entrada_bitacora (viaje_id, texto) VALUES (gen_random_uuid(), 'nota')`,
@@ -271,7 +273,7 @@ func TestGrantsPorTabla(t *testing.T) {
 		"op_bitacora NO debe poder borrar incidencias (se cierran por marca)")
 
 	// --- op_roster: dueño del roster; SÍ borra (baja de unidad). ---
-	poolRoster, closeRoster := dbtest.PoolAs(t, ctx, "op_roster")
+	poolRoster, closeRoster := dbtest.PoolAs(t, ctx, "op_roster", "")
 	defer closeRoster()
 	unidadID := "77777777-7777-7777-7777-777777777777"
 	mustExec(t, ctx, poolRoster,
