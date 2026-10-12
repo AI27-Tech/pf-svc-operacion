@@ -31,6 +31,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -63,20 +64,23 @@ type Deps struct {
 
 // Module es la instancia construida del módulo operacion.
 type Module struct {
-	pools  Pools
-	deps   Deps
-	viajes *viajes.Servicio
-	// Aquí vivirán los demás casos de uso (asignacion, bitacora) al implementarse.
+	pools      Pools
+	deps       Deps
+	viajes     *viajes.Servicio
+	asignacion *asignacion.Servicio
+	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
 
 // New recibe los pools por rol y los puertos ya resueltos. No lee entorno
 // (00 regla 4): la raíz cablea todo. Construye el publicador de outbox y el
 // caso de uso de viajes sobre el pool del rol op_viajes.
 func New(p Pools, d Deps) (*Module, error) {
+	pub := outbox.NewPublisher()
 	return &Module{
-		pools:  p,
-		deps:   d,
-		viajes: viajes.NewServicio(p.Viajes, outbox.NewPublisher()),
+		pools:      p,
+		deps:       d,
+		viajes:     viajes.NewServicio(p.Viajes, pub),
+		asignacion: asignacion.NewServicio(p.Asignacion, pub),
 	}, nil
 }
 
@@ -98,6 +102,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	}
 	protegido := auth.Middleware(m.deps.Verificador, nil)
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
+	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -120,6 +125,32 @@ func (m *Module) handleTransicionar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	escribirJSON(w, http.StatusOK, v)
+}
+
+// handleAsignar atiende POST /api/v1/viajes/{id}/asignacion: lee las unidades de
+// la escolta (AsignacionEntrada) y delega en el caso de uso de asignación, que
+// reserva + transiciona + audita en una transacción indivisible.
+func (m *Module) handleAsignar(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.AsignacionEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	a, err := m.asignacion.Asignar(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, a)
 }
 
 // escribirJSON serializa v como respuesta JSON con el status dado.
