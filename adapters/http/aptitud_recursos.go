@@ -39,24 +39,26 @@ func NewAptitudRecursosHTTP(baseURL string, doer catalogos.HttpRequestDoer) (*Ap
 	return &AptitudRecursosHTTP{cli: cli}, nil
 }
 
-// AptitudUnidad devuelve la aptitud informativa de una unidad-átomo (DEC-055).
-func (a *AptitudRecursosHTTP) AptitudUnidad(ctx context.Context, unidadID catalogos.Id) (*catalogos.Aptitud, error) {
+// AptitudVehiculo devuelve la aptitud informativa de un vehículo-átomo (DEC-055),
+// evaluada contra el contrato/SLA del cliente (tracer.4).
+func (a *AptitudRecursosHTTP) AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catalogos.Id) (*catalogos.Aptitud, error) {
 	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
 	defer cancel()
 
-	resp, err := a.cli.AptitudUnidadWithResponse(ctx, unidadID, &catalogos.AptitudUnidadParams{})
+	resp, err := a.cli.AptitudVehiculoWithResponse(ctx, vehiculoID, &catalogos.AptitudVehiculoParams{ClienteId: clienteID})
 	if err != nil {
-		return nil, traducirError("AptitudUnidad", err)
+		return nil, traducirError("AptitudVehiculo", err)
 	}
 	return aptitudDeRespuesta(resp.StatusCode(), resp.JSON200)
 }
 
-// AptitudCustodio devuelve la aptitud informativa de un custodio (DEC-055).
-func (a *AptitudRecursosHTTP) AptitudCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Aptitud, error) {
+// AptitudCustodio devuelve la aptitud informativa de un custodio (DEC-055),
+// evaluada contra el contrato/SLA del cliente (tracer.4).
+func (a *AptitudRecursosHTTP) AptitudCustodio(ctx context.Context, custodioID, clienteID catalogos.Id) (*catalogos.Aptitud, error) {
 	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
 	defer cancel()
 
-	resp, err := a.cli.AptitudCustodioWithResponse(ctx, custodioID, &catalogos.AptitudCustodioParams{})
+	resp, err := a.cli.AptitudCustodioWithResponse(ctx, custodioID, &catalogos.AptitudCustodioParams{ClienteId: clienteID})
 	if err != nil {
 		return nil, traducirError("AptitudCustodio", err)
 	}
