@@ -25,8 +25,12 @@ import (
 	"net/http"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 )
 
 // Pools agrupa los cinco pools, uno por rol/esquema (operacion.md (e), ADR 33).
@@ -51,15 +55,21 @@ type Deps struct {
 
 // Module es la instancia construida del módulo operacion.
 type Module struct {
-	pools Pools
-	deps  Deps
-	// Aquí vivirán los casos de uso de cada sub-módulo cuando se implementen.
+	pools  Pools
+	deps   Deps
+	viajes *viajes.Servicio
+	// Aquí vivirán los demás casos de uso (asignacion, bitacora) al implementarse.
 }
 
 // New recibe los pools por rol y los puertos ya resueltos. No lee entorno
-// (00 regla 4): la raíz cablea todo.
+// (00 regla 4): la raíz cablea todo. Construye el publicador de outbox y el
+// caso de uso de viajes sobre el pool del rol op_viajes.
 func New(p Pools, d Deps) (*Module, error) {
-	return &Module{pools: p, deps: d}, nil
+	return &Module{
+		pools:  p,
+		deps:   d,
+		viajes: viajes.NewServicio(p.Viajes, outbox.NewPublisher()),
+	}, nil
 }
 
 // Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado.
@@ -125,13 +135,19 @@ type consultas struct {
 }
 
 func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error) {
-	return nil, errNoImplementado("CrearViaje")
+	// El estado inicial lo fija el rol del creador (DEC-026). El rol viaja en los
+	// claims del token, que el middleware inyecta en el ctx (en core, vía bff).
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: crearViaje sin claims en el contexto")
+	}
+	return c.m.viajes.Crear(ctx, body, claims.Rol)
 }
 
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
-	return nil, errNoImplementado("ListarViajes")
+	return c.m.viajes.Listar(ctx, params)
 }
 
 func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
-	return nil, errNoImplementado("ObtenerViaje")
+	return c.m.viajes.Obtener(ctx, id)
 }
