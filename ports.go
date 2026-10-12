@@ -30,24 +30,26 @@ const PresupuestoAptitud = 2 * time.Second
 // transacción con la restricción de exclusión.
 //
 // Solo se declaran operaciones que EXISTEN en catalogos.yaml de la versión
-// fijada (regla 6: 1:1 con operationId). Hoy esas son aptitudUnidad y
+// fijada (regla 6: 1:1 con operationId). Hoy esas son aptitudVehiculo y
 // aptitudCustodio. Las listas (listarUnidades/listarCustodios) existen pero son
 // paginadas; el caso de uso de armado/asignación necesita lectura por átomo, y
 // esa superficie se añade cuando el contrato la exponga.
 //
-// BRECHAS reportadas (no se corrigen aquí; contrato primero):
-//   - C3: el contrato nombra el átomo como `Unidad` (`/api/v1/unidades`,
-//     semántica de ADR 24), no `Vehiculo` (ADR 31 §5). El puerto se tipa con lo
-//     que el contrato expone hoy; el rename espera a tracer.4.
-//   - Falta un obtenerUnidad / obtenerCustodio por id (solo hay lista + aptitud).
-//     El puerto no inventa ese método; se agrega cuando el contrato lo tenga.
+// C3 (resuelta en tracer.4): el átomo es `Vehiculo` (ADR 31 §5), no `Unidad`;
+// el puerto ya usa ese nombre. La aptitud se evalúa contra el contrato/SLA de un
+// cliente, así que ambas operaciones reciben `clienteID` (lo exige el contrato).
+//
+// BRECHA aún abierta: falta un obtenerVehiculo / obtenerCustodio por id (solo hay
+// lista + aptitud). El puerto no inventa ese método; se agrega cuando el contrato
+// lo tenga.
 type AptitudRecursos interface {
-	// AptitudUnidad y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
+	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
 	// nunca gatean armar la unidad ni asignarla. Si catalogos no responde o el
 	// dato está obsoleto, el caso de uso muestra "aptitud desconocida" y la
 	// asignación procede. El único rechazo de asignación es la reserva fallida.
-	AptitudUnidad(ctx context.Context, unidadID catalogos.Id) (*catalogos.Aptitud, error)
-	AptitudCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Aptitud, error)
+	// clienteID acota la evaluación al contrato/SLA de ese cliente (tracer.4).
+	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catalogos.Id) (*catalogos.Aptitud, error)
+	AptitudCustodio(ctx context.Context, custodioID, clienteID catalogos.Id) (*catalogos.Aptitud, error)
 }
 
 // Revocacion es la arista RESTRINGIDA hacia identidad (DEC-051): solo dos
