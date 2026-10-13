@@ -103,6 +103,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	protegido := auth.Middleware(m.deps.Verificador, nil)
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -146,6 +147,32 @@ func (m *Module) handleAsignar(w http.ResponseWriter, r *http.Request) {
 		actor = claims.Subject
 	}
 	a, err := m.asignacion.Asignar(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, a)
+}
+
+// handleReasignar atiende PATCH /api/v1/viajes/{id}/asignacion: lee la escolta
+// completa y el motivo (ReasignacionEntrada) y delega en el caso de uso, que
+// libera la asignación vigente + reserva la nueva + audita en una tx indivisible.
+func (m *Module) handleReasignar(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.ReasignacionEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	a, err := m.asignacion.Reasignar(r.Context(), id, body, actor)
 	if err != nil {
 		escribirError(w, err)
 		return
