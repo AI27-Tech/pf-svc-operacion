@@ -34,12 +34,13 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		clienteID uuid.UUID
 		origen    string
 		fhs       *time.Time
+		eta       *time.Time
 		creado    time.Time
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, creado_en
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
 		   FROM viajes.viaje WHERE id = $1`, id,
-	).Scan(&estadoAct, &clienteID, &origen, &fhs, &creado)
+	).Scan(&estadoAct, &clienteID, &origen, &fhs, &eta, &creado)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -103,6 +104,7 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		Origen:            origen,
 		Destinos:          destinos,
 		FechaHoraServicio: fhs,
+		EtaEstimado:       eta,
 		CreadoEn:          creado,
 	}, nil
 }
