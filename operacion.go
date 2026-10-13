@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
@@ -33,6 +34,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -67,6 +69,14 @@ type Deps struct {
 	// espera de ADR 32). Si es nil, Workers() no arranca el relay: el módulo
 	// escribe eventos a la tabla pero no los publica (arranque standalone sin bus).
 	BusPublisher bus.Publisher
+	// Broadcaster es el puerto de difusión del bus (ADR 29 §3). Si no es nil,
+	// operacion construye internamente su proyección de tombstones y arranca el
+	// consumidor de sesion.revocada que la alimenta; el middleware de Routes
+	// consulta esa MISMA proyección (rechaza una sesión revocada, ADR 26 §3). La
+	// proyección es asunto interno de operacion (no la construye la raíz): así el
+	// middleware y el worker comparten instancia por construcción. Nil en
+	// desarrollo sin bus: las rutas se protegen solo con verificación de firma.
+	Broadcaster bus.Broadcaster
 }
 
 // Module es la instancia construida del módulo operacion.
@@ -78,8 +88,21 @@ type Module struct {
 	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
 	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
 	relay worker.Worker
+	// revocacion es la proyección local de tombstones (ADR 26 §3). La construye
+	// New cuando hay Broadcaster; el middleware la consulta y el consumidor la
+	// alimenta. Nil sin bus. Es un tipo de internal/: por eso operacion la crea y
+	// la retiene aquí, no la raíz.
+	revocacion *autorizacion.Proyeccion
+	// consumidor es el worker de sesion.revocada (envuelto por el reconstructor de
+	// snapshot). nil sin Broadcaster.
+	consumidor worker.Worker
 	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
+
+// umbralFrescura es la ventana tras la cual el canal de revocación se considera
+// obsoleto y las rutas protegidas caen al fallback durable con identidad
+// (ADR 26 §5). Normativo, no configurable por despliegue.
+const umbralFrescura = 15 * time.Second
 
 // New recibe los pools por rol y los puertos ya resueltos. No lee entorno
 // (00 regla 4): la raíz cablea todo. Construye el publicador de outbox y el
@@ -98,6 +121,33 @@ func New(p Pools, d Deps) (*Module, error) {
 	// Corre con search_path=viajes, igual que el Publisher que ya lo escribe.
 	if d.BusPublisher != nil {
 		m.relay = outbox.NewRelay("outbox-relay:viajes", p.Viajes, d.BusPublisher, outbox.RelayOpciones{})
+	}
+	// Proyección de tombstones y su consumidor (ADR 26 §3): solo con Broadcaster.
+	// operacion es dueño de su proyección para que el middleware (Routes) y el
+	// consumidor (Workers) compartan la MISMA instancia por construcción.
+	if d.Broadcaster != nil {
+		proy := autorizacion.NuevaProyeccion()
+		m.revocacion = proy
+		senal := autorizacion.NuevaSenalCanal(time.Now)
+		// La regla de frescura/fallback (ADR 26 §5) necesita la arista a identidad
+		// (puerto Revocacion). Sin ella, la proyección queda en solo-tombstones
+		// locales: marca lo que llega por el canal, pero no puede caer al fallback
+		// durable. Degradación segura y documentada, no fallo de arranque.
+		if d.Revocacion != nil {
+			proy.ConFrescura(time.Now, senal, autorizacion.NuevaAutoridad(d.Revocacion), umbralFrescura)
+		}
+		cons, err := autorizacion.NuevoConsumidorRevocacion(d.Broadcaster, proy, senal)
+		if err != nil {
+			return nil, err
+		}
+		// Reconstrucción por snapshot (ADR 26 §4): precarga las revocadas vigentes
+		// de identidad y queda not-ready hasta converger. Sin Revocacion no hay de
+		// dónde precargar; se arranca el consumidor desnudo (sin snapshot inicial).
+		if d.Revocacion != nil {
+			m.consumidor = autorizacion.NuevoReconstructor(cons, d.Revocacion, proy)
+		} else {
+			m.consumidor = cons
+		}
 	}
 	return m, nil
 }
@@ -118,7 +168,16 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	if m.deps.Verificador == nil {
 		return
 	}
-	protegido := auth.Middleware(m.deps.Verificador, nil)
+	// La proyección de tombstones se consulta en cada ruta protegida (ADR 26 §3):
+	// una sesión revocada se rechaza aunque su token siga siendo válido por firma.
+	// Si no hay proyección (sin bus), se pasa un RevocationChecker nil de interfaz
+	// (no un puntero nil envuelto) para que el middleware omita la consulta en vez
+	// de hacer panic: en desarrollo las rutas valen solo por firma.
+	var rev auth.RevocationChecker
+	if m.revocacion != nil {
+		rev = m.revocacion
+	}
+	protegido := auth.Middleware(m.deps.Verificador, rev)
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
@@ -251,10 +310,14 @@ func escribirError(w http.ResponseWriter, err error) {
 // no hay relay y la lista va vacía (arranque standalone sin bus). Los dos
 // consumidores durables siguen pendientes (DEC-057).
 func (m *Module) Workers() []worker.Worker {
-	if m.relay == nil {
-		return nil
+	var ws []worker.Worker
+	if m.relay != nil {
+		ws = append(ws, m.relay)
 	}
-	return []worker.Worker{m.relay}
+	if m.consumidor != nil {
+		ws = append(ws, m.consumidor)
+	}
+	return ws
 }
 
 // Consultas expone los casos de uso que bff consume en proceso (arista síncrona
