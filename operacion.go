@@ -122,6 +122,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -196,6 +197,28 @@ func (m *Module) handleReasignar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	escribirJSON(w, http.StatusOK, a)
+}
+
+// handleFijarEta atiende PATCH /api/v1/viajes/{id}/eta: lee el ETA capturado a
+// mano (EtaEntrada) y delega en viajes. No es un cambio de estado (ADR 20): solo
+// rechaza si el viaje está en estado terminal.
+func (m *Module) handleFijarEta(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.EtaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	v, err := m.viajes.FijarEta(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, v)
 }
 
 // escribirJSON serializa v como respuesta JSON con el status dado.
