@@ -27,6 +27,7 @@ import (
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
+	"github.com/AI27-Tech/pf-pkg-platform-go/bus"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
@@ -60,6 +61,12 @@ type Deps struct {
 	// se crea un endpoint sin autenticar). La raíz lo inyecta (el autenticador real
 	// o el stub de desarrollo).
 	Verificador auth.Authenticator
+	// BusPublisher es el publicador del bus que usa el Relay de outbox para
+	// drenar los eventos viaje.* del esquema `viajes` (ADR 35, el único outbox de
+	// operacion). Agnóstico al transporte (bus/memory en desarrollo; broker en
+	// espera de ADR 32). Si es nil, Workers() no arranca el relay: el módulo
+	// escribe eventos a la tabla pero no los publica (arranque standalone sin bus).
+	BusPublisher bus.Publisher
 }
 
 // Module es la instancia construida del módulo operacion.
@@ -68,6 +75,9 @@ type Module struct {
 	deps       Deps
 	viajes     *viajes.Servicio
 	asignacion *asignacion.Servicio
+	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
+	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
+	relay worker.Worker
 	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
 
@@ -76,12 +86,20 @@ type Module struct {
 // caso de uso de viajes sobre el pool del rol op_viajes.
 func New(p Pools, d Deps) (*Module, error) {
 	pub := outbox.NewPublisher()
-	return &Module{
+	m := &Module{
 		pools:      p,
 		deps:       d,
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
-	}, nil
+	}
+	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
+	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
+	// por la excepción de GRANT). Un solo relay sobre el pool op_viajes lo drena.
+	// Corre con search_path=viajes, igual que el Publisher que ya lo escribe.
+	if d.BusPublisher != nil {
+		m.relay = outbox.NewRelay("outbox-relay:viajes", p.Viajes, d.BusPublisher, outbox.RelayOpciones{})
+	}
+	return m, nil
 }
 
 // Routes monta las rutas HTTP del módulo bajo /api/v1/... en el mux dado.
@@ -103,6 +121,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	protegido := auth.Middleware(m.deps.Verificador, nil)
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -153,6 +172,32 @@ func (m *Module) handleAsignar(w http.ResponseWriter, r *http.Request) {
 	escribirJSON(w, http.StatusOK, a)
 }
 
+// handleReasignar atiende PATCH /api/v1/viajes/{id}/asignacion: lee la escolta
+// completa y el motivo (ReasignacionEntrada) y delega en el caso de uso, que
+// libera la asignación vigente + reserva la nueva + audita en una tx indivisible.
+func (m *Module) handleReasignar(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.ReasignacionEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	a, err := m.asignacion.Reasignar(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, a)
+}
+
 // escribirJSON serializa v como respuesta JSON con el status dado.
 func escribirJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -178,12 +223,15 @@ func escribirError(w http.ResponseWriter, err error) {
 // efecto es en memoria (invalidar caché / proyección de revocación reconstruida
 // desde snapshot, ADR 26), así que no hay tabla inbox_evento.
 //
-// Scaffolding: hoy devuelve lista vacía. El publisher de viajes se cablea cuando
-// la raíz inyecte el adaptador de bus (bus/memory en desarrollo; broker real en
-// espera de ADR 32); los consumidores, con su suscripción durable propia
-// (DEC-057).
+// Hoy arranca el relay de viajes.outbox cuando la raíz inyectó el BusPublisher
+// (bus/memory en desarrollo; broker real en espera de ADR 32). Sin BusPublisher,
+// no hay relay y la lista va vacía (arranque standalone sin bus). Los dos
+// consumidores durables siguen pendientes (DEC-057).
 func (m *Module) Workers() []worker.Worker {
-	return nil
+	if m.relay == nil {
+		return nil
+	}
+	return []worker.Worker{m.relay}
 }
 
 // Consultas expone los casos de uso que bff consume en proceso (arista síncrona
