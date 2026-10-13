@@ -3,6 +3,7 @@ package viajes_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
@@ -174,5 +175,77 @@ func TestCrearValidaciones(t *testing.T) {
 	// Obtener un id inexistente → NoEncontrado (error no nil).
 	if _, err := svc.Obtener(ctx, uuid.New()); err == nil {
 		t.Error("Obtener de un viaje inexistente debió fallar")
+	}
+}
+
+func TestFijarEta(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+	cli := uuid.New()
+
+	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
+		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
+	}, "jefe_operativo")
+	if err != nil {
+		t.Fatalf("Crear: %v", err)
+	}
+
+	// Fijar un ETA: se guarda y se devuelve, sin cambiar el estado.
+	eta := time.Now().Add(6 * time.Hour).UTC().Truncate(time.Second)
+	out, err := svc.FijarEta(ctx, v.Id, operclient.EtaEntrada{EtaEstimado: eta})
+	if err != nil {
+		t.Fatalf("FijarEta: %v", err)
+	}
+	if out.EtaEstimado == nil || !out.EtaEstimado.Equal(eta) {
+		t.Errorf("eta devuelto: got %v, want %v", out.EtaEstimado, eta)
+	}
+	if out.Estado != operclient.APROBADO {
+		t.Errorf("fijar eta no debe cambiar el estado: got %q, want APROBADO", out.Estado)
+	}
+
+	// Persistió: Obtener lo trae.
+	det, err := svc.Obtener(ctx, v.Id)
+	if err != nil {
+		t.Fatalf("Obtener: %v", err)
+	}
+	if det.Viaje.EtaEstimado == nil || !det.Viaje.EtaEstimado.Equal(eta) {
+		t.Errorf("eta persistido: got %v, want %v", det.Viaje.EtaEstimado, eta)
+	}
+
+	// Re-fijar lo reemplaza (captura manual, no acumulativa).
+	eta2 := eta.Add(2 * time.Hour)
+	if _, err := svc.FijarEta(ctx, v.Id, operclient.EtaEntrada{EtaEstimado: eta2}); err != nil {
+		t.Fatalf("FijarEta (segunda): %v", err)
+	}
+	det2, _ := svc.Obtener(ctx, v.Id)
+	if det2.Viaje.EtaEstimado == nil || !det2.Viaje.EtaEstimado.Equal(eta2) {
+		t.Errorf("eta re-fijado: got %v, want %v", det2.Viaje.EtaEstimado, eta2)
+	}
+}
+
+func TestFijarEtaRechazos(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	// Viaje inexistente → NoEncontrado.
+	if _, err := svc.FijarEta(ctx, uuid.New(), operclient.EtaEntrada{EtaEstimado: time.Now().UTC()}); err == nil {
+		t.Error("FijarEta sobre un viaje inexistente debió fallar")
+	}
+
+	// Viaje en estado terminal → conflicto (contrato: viaje_en_estado_terminal).
+	cli := uuid.New()
+	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
+		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
+	}, "jefe_operativo")
+	if err != nil {
+		t.Fatalf("Crear: %v", err)
+	}
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	if _, err := admin.Exec(ctx, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id=$1", v.Id); err != nil {
+		t.Fatalf("cerrar viaje: %v", err)
+	}
+	if _, err := svc.FijarEta(ctx, v.Id, operclient.EtaEntrada{EtaEstimado: time.Now().UTC()}); err == nil {
+		t.Error("FijarEta sobre un viaje terminal debió fallar")
 	}
 }
