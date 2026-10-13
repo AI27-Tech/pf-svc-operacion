@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/estados"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
@@ -128,9 +129,13 @@ func estadoInicialPara(rol string) operclient.EstadoViaje {
 	return operclient.APROBADO
 }
 
-// Obtener lee el detalle de un viaje: el agregado, sus destinos y sus
-// condiciones ortogonales abiertas (ADR 27 / §C.2). NoEncontrado si no existe.
-func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
+// FijarEta guarda el ETA capturado a mano por el operador (ADR 20 / DEC-007). NO
+// es un cambio de estado: no valida contra el grafo de transiciones, solo exige
+// que el viaje no esté en un estado terminal (contrato: 409
+// viaje_en_estado_terminal). Guarda el valor crudo y devuelve el viaje; la
+// obsolescencia (`stale`) la deriva el bff al leer, no operacion. No publica
+// evento (los eventos viaje.* no incluyen el ETA).
+func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient.EtaEntrada) (*operclient.Viaje, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -148,6 +153,64 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 		`SELECT estado, cliente_id, origen, fecha_hora_servicio, creado_en
 		   FROM viajes.viaje WHERE id = $1`, id,
 	).Scan(&estado, &clienteID, &origen, &fhs, &creado)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("operacion: cargar viaje: %w", err)
+	}
+	if estados.EstadoViaje(estado).EsTerminal() {
+		return nil, platformerrors.NewConflicto("operacion: no se fija ETA en un viaje en estado terminal (%s)", estado)
+	}
+
+	eta := in.EtaEstimado.UTC()
+	if _, err := tx.Exec(ctx, `UPDATE viajes.viaje SET eta_estimado = $1 WHERE id = $2`, eta, id); err != nil {
+		return nil, fmt.Errorf("operacion: actualizar eta: %w", err)
+	}
+
+	destinos, err := s.destinosDe(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("operacion: commit fijar eta: %w", err)
+	}
+
+	cid := operclient.Id(clienteID)
+	return &operclient.Viaje{
+		Id:                id,
+		Estado:            operclient.EstadoViaje(estado),
+		ClienteId:         &cid,
+		Origen:            origen,
+		Destinos:          destinos,
+		FechaHoraServicio: fhs,
+		EtaEstimado:       &eta,
+		CreadoEn:          creado,
+	}, nil
+}
+
+// Obtener lee el detalle de un viaje: el agregado, sus destinos y sus
+// condiciones ortogonales abiertas (ADR 27 / §C.2). NoEncontrado si no existe.
+func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var (
+		estado    string
+		clienteID uuid.UUID
+		origen    string
+		fhs       *time.Time
+		eta       *time.Time
+		creado    time.Time
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		   FROM viajes.viaje WHERE id = $1`, id,
+	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -174,6 +237,7 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 			Origen:            origen,
 			Destinos:          destinos,
 			FechaHoraServicio: fhs,
+			EtaEstimado:       eta,
 			CreadoEn:          creado,
 		},
 		CondicionesActivas: conds,
@@ -216,7 +280,7 @@ func (s *Servicio) Listar(ctx context.Context, params operclient.ListarViajesPar
 	}
 	args = append(args, paginaMax+1) // +1 para saber si hay página siguiente
 	q := fmt.Sprintf(
-		`SELECT id, estado, cliente_id, origen, fecha_hora_servicio, creado_en
+		`SELECT id, estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
 		   FROM viajes.viaje %s ORDER BY creado_en DESC, id DESC LIMIT $%d`, where, n)
 
 	rows, err := tx.Query(ctx, q, args...)
@@ -232,16 +296,17 @@ func (s *Servicio) Listar(ctx context.Context, params operclient.ListarViajesPar
 			clienteID uuid.UUID
 			origen    string
 			fhs       *time.Time
+			eta       *time.Time
 			creado    time.Time
 		)
-		if err := rows.Scan(&id, &estado, &clienteID, &origen, &fhs, &creado); err != nil {
+		if err := rows.Scan(&id, &estado, &clienteID, &origen, &fhs, &eta, &creado); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("operacion: escanear viaje: %w", err)
 		}
 		cid := operclient.Id(clienteID)
 		items = append(items, operclient.Viaje{
 			Id: id, Estado: operclient.EstadoViaje(estado), ClienteId: &cid,
-			Origen: origen, FechaHoraServicio: fhs, CreadoEn: creado,
+			Origen: origen, FechaHoraServicio: fhs, EtaEstimado: eta, CreadoEn: creado,
 		})
 		ids = append(ids, id.String())
 	}
