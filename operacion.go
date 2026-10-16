@@ -35,6 +35,8 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -77,6 +79,15 @@ type Deps struct {
 	// middleware y el worker comparten instancia por construcción. Nil en
 	// desarrollo sin bus: las rutas se protegen solo con verificación de firma.
 	Broadcaster bus.Broadcaster
+	// Subscriber es el bus durable del que operacion consume catalogo.actualizado
+	// (DEC-057, E5-T5) para invalidar su caché en proceso de aptitud. Si no es
+	// nil, New envuelve el puerto Aptitud con la caché (internal/catalogoscache) y
+	// arranca el consumidor durable que la invalida; así la lectura de aptitud y
+	// la invalidación comparten la MISMA instancia de caché por construcción. Nil
+	// en arranque standalone sin bus: entonces Aptitud se usa sin caché (lectura
+	// directa a catalogos), que es correcto —sin bus no hay evento que invalide,
+	// y una caché sin invalidación solo acumularía obsolescencia—.
+	Subscriber bus.Subscriber
 }
 
 // Module es la instancia construida del módulo operacion.
@@ -96,6 +107,9 @@ type Module struct {
 	// consumidor es el worker de sesion.revocada (envuelto por el reconstructor de
 	// snapshot). nil sin Broadcaster.
 	consumidor worker.Worker
+	// consumidorCatalogos es el worker durable de catalogo.actualizado que
+	// invalida la caché de aptitud (E5-T5). nil sin Subscriber.
+	consumidorCatalogos worker.Worker
 	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
 
@@ -148,6 +162,30 @@ func New(p Pools, d Deps) (*Module, error) {
 		} else {
 			m.consumidor = cons
 		}
+	}
+	// Caché de aptitud + su consumidor de invalidación (E5-T5): solo con Subscriber
+	// y con un puerto Aptitud que envolver. Se envuelve el Aptitud inyectado con la
+	// caché en proceso y se guarda de vuelta en deps, de modo que todo caso de uso
+	// que lea aptitud por m.deps.Aptitud use la MISMA instancia que el consumidor
+	// invalida (igual que la proyección de tombstones: construida aquí, compartida
+	// por construcción). Sin Subscriber no se cachea (ver Deps.Subscriber).
+	if d.Subscriber != nil && d.Aptitud != nil {
+		cache := catalogoscache.Nueva(d.Aptitud, 0) // 0 ⇒ TTL por defecto
+		m.deps.Aptitud = cache
+		cons := consumidores.NuevoConsumidorCatalogo(cache)
+		handler := func(ctx context.Context, s bus.Sobre) error {
+			return cons.Procesar(ctx, s)
+		}
+		w, err := d.Subscriber.Subscribe(
+			"operacion-catalogos",
+			bus.SensibilidadAmplia,
+			[]string{consumidores.TipoCatalogoActualizado},
+			handler,
+		)
+		if err != nil {
+			return nil, err
+		}
+		m.consumidorCatalogos = w
 	}
 	return m, nil
 }
@@ -306,9 +344,12 @@ func escribirError(w http.ResponseWriter, err error) {
 // desde snapshot, ADR 26), así que no hay tabla inbox_evento.
 //
 // Hoy arranca el relay de viajes.outbox cuando la raíz inyectó el BusPublisher
-// (bus/memory en desarrollo; broker real en espera de ADR 32). Sin BusPublisher,
-// no hay relay y la lista va vacía (arranque standalone sin bus). Los dos
-// consumidores durables siguen pendientes (DEC-057).
+// (bus/memory en desarrollo; broker real en espera de ADR 32), más el consumidor
+// durable de catalogo.actualizado cuando la raíz inyectó el Subscriber (E5-T5):
+// invalida la caché en proceso de aptitud. El consumidor durable de
+// sesion.revocada sigue por el canal de difusión (Broadcaster), no por el
+// Subscriber. Sin BusPublisher ni Subscriber ni Broadcaster, la lista va vacía
+// (arranque standalone sin bus).
 func (m *Module) Workers() []worker.Worker {
 	var ws []worker.Worker
 	if m.relay != nil {
@@ -316,6 +357,9 @@ func (m *Module) Workers() []worker.Worker {
 	}
 	if m.consumidor != nil {
 		ws = append(ws, m.consumidor)
+	}
+	if m.consumidorCatalogos != nil {
+		ws = append(ws, m.consumidorCatalogos)
 	}
 	return ws
 }

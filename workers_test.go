@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
 	"github.com/AI27-Tech/pf-pkg-platform-go/bus"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	operacion "github.com/AI27-Tech/pf-svc-operacion"
@@ -120,6 +121,104 @@ func TestWorkersSinBroadcasterNoArrancaConsumidor(t *testing.T) {
 	for _, x := range m.Workers() {
 		if x.Name() == "operacion-revocacion" {
 			t.Error("sin Broadcaster no debe haber consumidor de revocación")
+		}
+	}
+}
+
+// suscriptorFake es un bus.Subscriber mínimo para comprobar el CABLEADO del
+// consumidor durable de catalogo.actualizado (New → Workers). Devuelve un worker
+// cuyo nombre refleja el durableName pedido, igual que haría el adaptador real
+// ("bus-durable:"+durableName); así el test fija el nombre observable del worker.
+// Guarda el filtro recibido para comprobar que se suscribe al tipo correcto.
+type suscriptorFake struct {
+	durableName string
+	superficie  bus.Sensibilidad
+	filtro      []string
+}
+
+func (s *suscriptorFake) Subscribe(durableName string, superficie bus.Sensibilidad, filtroTipos []string, h bus.Handler) (worker.Worker, error) {
+	s.durableName = durableName
+	s.superficie = superficie
+	s.filtro = filtroTipos
+	return workerConNombre{nombre: "bus-durable:" + durableName}, nil
+}
+
+type workerConNombre struct{ nombre string }
+
+func (w workerConNombre) Name() string                  { return w.nombre }
+func (workerConNombre) Ready(ctx context.Context) error { return nil }
+func (workerConNombre) Run(ctx context.Context) error   { <-ctx.Done(); return nil }
+
+// aptitudFake satisface operacion.AptitudRecursos para que New envuelva un puerto
+// real con la caché. No necesita devolver nada útil: el test solo comprueba el
+// cableado del worker, no la lectura de aptitud.
+type aptitudFake struct{}
+
+func (aptitudFake) AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catalogos.Id) (*catalogos.Aptitud, error) {
+	return &catalogos.Aptitud{}, nil
+}
+func (aptitudFake) AptitudCustodio(ctx context.Context, custodioID, clienteID catalogos.Id) (*catalogos.Aptitud, error) {
+	return &catalogos.Aptitud{}, nil
+}
+
+// TestWorkersConSubscriberArrancaConsumidorCatalogos fija que, con Subscriber y
+// un puerto Aptitud que envolver, operacion expone el consumidor durable de
+// catalogo.actualizado (E5-T5) además del relay, suscrito al tipo correcto sobre
+// la superficie amplia.
+func TestWorkersConSubscriberArrancaConsumidorCatalogos(t *testing.T) {
+	sub := &suscriptorFake{}
+	m, err := operacion.New(operacion.Pools{}, operacion.Deps{
+		BusPublisher: busFake{},
+		Subscriber:   sub,
+		Aptitud:      aptitudFake{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Se suscribió al tipo correcto, sobre la superficie amplia, con el durable
+	// del módulo.
+	if sub.durableName != "operacion-catalogos" {
+		t.Errorf("durableName = %q, want operacion-catalogos", sub.durableName)
+	}
+	if sub.superficie != bus.SensibilidadAmplia {
+		t.Errorf("superficie = %q, want amplia", sub.superficie)
+	}
+	if len(sub.filtro) != 1 || sub.filtro[0] != "catalogo.actualizado" {
+		t.Errorf("filtro = %v, want [catalogo.actualizado]", sub.filtro)
+	}
+
+	// El worker aparece en Workers() con el nombre durable del bus.
+	var nombres []string
+	for _, x := range m.Workers() {
+		nombres = append(nombres, x.Name())
+	}
+	tiene := func(n string) bool {
+		for _, x := range nombres {
+			if x == n {
+				return true
+			}
+		}
+		return false
+	}
+	if !tiene("bus-durable:operacion-catalogos") {
+		t.Errorf("falta el consumidor de catálogos en Workers: %v", nombres)
+	}
+}
+
+// TestWorkersSinSubscriberNoArrancaConsumidorCatalogos fija que sin Subscriber no
+// hay consumidor de catálogos (y por tanto Aptitud se usa sin caché).
+func TestWorkersSinSubscriberNoArrancaConsumidorCatalogos(t *testing.T) {
+	m, err := operacion.New(operacion.Pools{}, operacion.Deps{
+		BusPublisher: busFake{},
+		Aptitud:      aptitudFake{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for _, x := range m.Workers() {
+		if x.Name() == "bus-durable:operacion-catalogos" {
+			t.Error("sin Subscriber no debe haber consumidor de catálogos")
 		}
 	}
 }
