@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## 2026:10:15 (hora local)
+
+**Resumen:** E5-T5 (AI27-77), lado consumidor en `operacion`: una caché en proceso de aptitud detrás del puerto `AptitudRecursos`, invalidada por el evento `catalogo.actualizado` que publica `catalogos`. Es la mitad consumidora de E5-T5; el productor ya emitía el evento desde E5-T1..T4. Alcance acotado a `operacion` (único consumidor que nombran el proto `catalogo.proto` y `contracts/events/INVENTARIO.md`); `mensajeria`/`bff`/`reportes` quedan como tickets hermanos.
+
+**Para quién:** para el caso de uso de armado/asignación de `operacion`, que lee aptitud de `catalogos`. Antes cada lectura pegaba HTTP a `catalogos` (adaptador `AptitudRecursosHTTP`), sin caché ni invalidación. Ahora, cuando hay bus, esas lecturas se sirven de una caché en proceso con techo de obsolescencia por TTL e invalidación por evento.
+
+**Cambios:**
+- `internal/catalogoscache/aptitud.go` (nuevo): `CacheAptitud` decora `AptitudRecursos` (interfaz local, para no importar la raíz y evitar un ciclo). Clave `{entidad, recurso, cliente}`. TTL corto como techo de obsolescencia (default 30 s), reloj inyectable. Un fallo del subyacente NO se cachea y se propaga como degradado: la aptitud es **informativa** (DEC-055), el caso de uso lo traduce a "aptitud desconocida" y la asignación procede; la caché nunca convierte el fallo en rechazo. `Invalidar(entidad, recurso)` borra la entrada (idempotente, P13).
+- `internal/consumidores/catalogo.go` (nuevo): `ConsumidorCatalogo` procesa `catalogo.actualizado`, deduplica por `evento_id` **en memoria** (ADR 34 / DEC-067: sin tabla `inbox_evento`, porque el efecto es en memoria) e invalida la entrada de caché. Reentregar el mismo evento invalida una sola vez (P13). Payload ilegible o metadato incompleto se acusa sin invalidar (no reintentable; tolerable porque la aptitud es informativa).
+- `operacion.go`: `Deps` gana `Subscriber bus.Subscriber`. Cuando hay `Subscriber` y un `Aptitud` que envolver, `New` envuelve el puerto con la caché (misma instancia que invalida el consumidor, por construcción) y arranca el consumidor durable `operacion-catalogos`, suscrito a `catalogo.actualizado` sobre la superficie amplia; `Workers()` lo expone. Sin `Subscriber` (standalone sin bus) no se cachea: sin evento que invalide, una caché solo acumularía obsolescencia.
+- `internal/catalogoscache/aptitud_test.go`, `internal/consumidores/catalogo_test.go`, `internal/consumidores/catalogo_e2e_test.go`, `workers_test.go` (tests): hit dentro del TTL / TTL como techo con broker caído / error no cacheado y propagado (DEC-055) / invalidación por evento / idempotencia P13; invalidación de **extremo a extremo** con `bus/memory` real; cableado del worker en `Module` con y sin `Subscriber`.
+
+**Brecha / nota de contrato (C10):** el proto `CatalogoActualizado` (tracer.8) lleva `entidad` + `entidad_id` + `actualizado_en`, **sin campo `version`**. La versión viaja en el sobre de dominio (`bus.Sobre.Version`); este consumidor invalida de forma incondicional y no la necesita. Alinear el payload queda diferido a cuando el contrato agregue el campo.
+
+**Contradicción reportada (no decidida por código):** el documento `docs/historias-tecnicas/E5-administracion-catalogos.md §E5-T5` dice que la aptitud **falla cerrado**; el ticket AI27-77 y DEC-055 dicen **informativa**. Se implementó **informativa** por decisión de Product (DEC-055, coherente con E5-T1/T2). El documento de historias técnicas quedó desactualizado y debe reconciliarse.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` (todo verde, incluidos los tests de `Workers()` previos, intactos).
+
+**Archivos modificados:**
+- `operacion.go`
+- `workers_test.go`
+- `internal/catalogoscache/aptitud.go` (nuevo)
+- `internal/catalogoscache/aptitud_test.go` (nuevo)
+- `internal/consumidores/catalogo.go` (nuevo)
+- `internal/consumidores/catalogo_test.go` (nuevo)
+- `internal/consumidores/catalogo_e2e_test.go` (nuevo)
+
 ## 2026:10:07 17:15
 
 **Resumen:** Se amplía `operacion.Consultas()` a los tres métodos que `bff` consume (`CrearViaje`, `ListarViajes`, `ObtenerViaje`), con la forma exacta de `bff.OperacionPort`. Brecha detectada al cablear core: la fachada entrante solo exponía `ObtenerViaje` y devolvía `*Viaje`, no `*ViajeDetalle`; sin los tres, core no podía construir el adaptador en proceso `bff → operacion`.
