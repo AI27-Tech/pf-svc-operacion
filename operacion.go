@@ -240,7 +240,14 @@ func (m *Module) handleTransicionar(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
 		return
 	}
-	v, err := m.viajes.Transicionar(r.Context(), id, body)
+	// El rol del actor viaja en los claims (DEC-053): lo exige la guarda del
+	// cierre (anticipado solo por un operador interno autorizado, DEC-020 #6 /
+	// DEC-060 #1). Las demás aristas lo ignoran.
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	v, err := m.viajes.Transicionar(r.Context(), id, body, rol)
 	if err != nil {
 		escribirError(w, err)
 		return
