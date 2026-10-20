@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026:10:19
+
+**Resumen:** Se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.4` a `v0.1.0-tracer.10`. El salto es 100% aditivo en los clientes generados que `operacion` consume (sin líneas eliminadas ni cambios de firma entre las dos olas), así que no toca ningún caso de uso, handler ni tipo existente. Pone al día el contrato que `operacion` resuelve, que iba siete olas atrás del vivo; deja el cliente con las superficies de bitácora/auditoría ya contratadas disponibles para cuando E1-T5/E6-T3 (otro dueño) las consuman. No implementa ninguna de esas operaciones: solo actualiza el pin.
+
+**Para quién:** para quien construya bitácora (E1-T5, AI27-13) y la descarga (E6-T3, AI27-80) sobre `operacion`: el cliente generado deja de estar atrás del contrato.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` a `v0.1.0-tracer.10`.
+
+**Verificado:** `go build`/`vet` en verde, `gofmt` limpio, `go test ./...` en verde (incl. integración contra Postgres local: asignación atómica y viajes), `arch-test@v0.1.1 OK`.
+
 ## 2026:10:15 (hora local)
 
 **Resumen:** E5-T5 (AI27-77), lado consumidor en `operacion`: una caché en proceso de aptitud detrás del puerto `AptitudRecursos`, invalidada por el evento `catalogo.actualizado` que publica `catalogos`. Es la mitad consumidora de E5-T5; el productor ya emitía el evento desde E5-T1..T4. Alcance acotado a `operacion` (único consumidor que nombran el proto `catalogo.proto` y `contracts/events/INVENTARIO.md`); `mensajeria`/`bff`/`reportes` quedan como tickets hermanos.
