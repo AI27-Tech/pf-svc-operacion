@@ -1,5 +1,39 @@
 # CHANGELOG
 
+## 2026:10:20
+
+**Resumen:** E1-T5 (AI27-13): caso de uso de bitácora del viaje en `operacion`. Registrar una entrada y listar las entradas de un viaje en orden cronológico `(viaje_id, creado_en)`. La bitácora es append-only: no hay edición ni borrado de entradas; una corrección es una entrada nueva. Consume la superficie de bitácora ya contratada en `pf-pkg-contracts` (disponible desde tracer.10).
+
+**Para quién:** para `bff` y los paneles que registran y leen la bitácora de un viaje. Antes `internal/bitacora` era solo un stub (`doc.go`); ahora expone el caso de uso y sus rutas HTTP.
+
+**Cambios:**
+- `internal/bitacora/servicio.go` (nuevo): `Servicio` con `RegistrarEntrada` y `ListarBitacora`, mismo patrón que `viajes`/`asignacion` (`Servicio{tx BeginTx}`, `NewServicio`, `tx.Begin → defer Rollback → validar → exec → Commit`). `RegistrarEntrada` hace un INSERT append-only y exige texto no vacío. `ListarBitacora` lee en orden cronológico (más antiguas primero) con paginación por cursor keyset. El id público del contrato (UUID) se deriva como UUIDv5 determinista del correlativo interno (`BIGSERIAL`): estable entre registrar y listar y opaco, sin tocar el contrato ni agregar columnas.
+- `internal/bitacora/cursor.go` (nuevo): cursor opaco base64 sobre `(creado_en, correlativo)`.
+- `operacion.go`: handlers `handleRegistrarBitacora` y `handleListarBitacora`, rutas `POST` y `GET /api/v1/viajes/{id}/bitacora` protegidas, y construcción del servicio en `New` con el pool `p.Bitacora`.
+- `internal/bitacora/servicio_integration_test.go`, `bitacora_rutas_test.go` (tests): registrar y listar en orden con id estable y filtro por viaje; texto obligatorio; append-only verificado al nivel del GRANT (UPDATE/DELETE con `op_bitacora` fallan); la ruta solo acepta POST y GET (DELETE → 405, `Allow` sin PUT/PATCH/DELETE).
+
+**Decisión reportada (no resuelta por código):** la bitácora NO audita en V1. El interceptor de auditoría (P3) escribe en el esquema `auditoria`, pero la única excepción de GRANT cruzado del sistema es `op_asignacion` (operacion.md §(e), ADR 18 §4); dar a `op_bitacora` acceso a `auditoria` sería una segunda excepción prohibida sin ADR. Queda consistente con `viajes`, que tampoco audita hoy. Si P3 exige auditar la bitácora en su transacción, es una decisión de arquitectura que debe ampliar la excepción por ADR.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+
+**Archivos modificados:**
+- `operacion.go`
+- `internal/bitacora/servicio.go` (nuevo)
+- `internal/bitacora/cursor.go` (nuevo)
+- `internal/bitacora/servicio_integration_test.go` (nuevo)
+- `bitacora_rutas_test.go` (nuevo)
+
+## 2026:10:19
+
+**Resumen:** Se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.4` a `v0.1.0-tracer.10`. El salto es 100% aditivo en los clientes generados que `operacion` consume (sin líneas eliminadas ni cambios de firma entre las dos olas), así que no toca ningún caso de uso, handler ni tipo existente. Pone al día el contrato que `operacion` resuelve, que iba siete olas atrás del vivo; deja el cliente con las superficies de bitácora/auditoría ya contratadas disponibles para cuando E1-T5/E6-T3 (otro dueño) las consuman. No implementa ninguna de esas operaciones: solo actualiza el pin.
+
+**Para quién:** para quien construya bitácora (E1-T5, AI27-13) y la descarga (E6-T3, AI27-80) sobre `operacion`: el cliente generado deja de estar atrás del contrato.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` a `v0.1.0-tracer.10`.
+
+**Verificado:** `go build`/`vet` en verde, `gofmt` limpio, `go test ./...` en verde (incl. integración contra Postgres local: asignación atómica y viajes), `arch-test@v0.1.1 OK`.
+
 ## 2026:10:15 (hora local)
 
 **Resumen:** E5-T5 (AI27-77), lado consumidor en `operacion`: una caché en proceso de aptitud detrás del puerto `AptitudRecursos`, invalidada por el evento `catalogo.actualizado` que publica `catalogos`. Es la mitad consumidora de E5-T5; el productor ya emitía el evento desde E5-T1..T4. Alcance acotado a `operacion` (único consumidor que nombran el proto `catalogo.proto` y `contracts/events/INVENTARIO.md`); `mensajeria`/`bff`/`reportes` quedan como tickets hermanos.
