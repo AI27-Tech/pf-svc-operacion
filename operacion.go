@@ -35,6 +35,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/bitacora"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
@@ -96,6 +97,7 @@ type Module struct {
 	deps       Deps
 	viajes     *viajes.Servicio
 	asignacion *asignacion.Servicio
+	bitacora   *bitacora.Servicio
 	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
 	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
 	relay worker.Worker
@@ -110,7 +112,6 @@ type Module struct {
 	// consumidorCatalogos es el worker durable de catalogo.actualizado que
 	// invalida la caché de aptitud (E5-T5). nil sin Subscriber.
 	consumidorCatalogos worker.Worker
-	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
 }
 
 // umbralFrescura es la ventana tras la cual el canal de revocación se considera
@@ -128,6 +129,7 @@ func New(p Pools, d Deps) (*Module, error) {
 		deps:       d,
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
+		bitacora:   bitacora.NewServicio(p.Bitacora),
 	}
 	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
@@ -220,6 +222,8 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
+	mux.Handle("POST /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleRegistrarBitacora)))
+	mux.Handle("GET /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleListarBitacora)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -316,6 +320,57 @@ func (m *Module) handleFijarEta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	escribirJSON(w, http.StatusOK, v)
+}
+
+// handleRegistrarBitacora atiende POST /api/v1/viajes/{id}/bitacora: lee el texto
+// de la entrada (EntradaBitacoraEntrada) y delega en el caso de uso de bitácora,
+// que inserta la entrada (append-only) y audita en la misma tx. 201 Created.
+//
+// NO existe handler de edición ni de borrado de entradas: la bitácora es
+// append-only (E1-T5), y una corrección es una entrada nueva.
+func (m *Module) handleRegistrarBitacora(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.EntradaBitacoraEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	e, err := m.bitacora.RegistrarEntrada(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, e)
+}
+
+// handleListarBitacora atiende GET /api/v1/viajes/{id}/bitacora: lee el cursor
+// opcional de la query y delega en el caso de uso, que devuelve las entradas en
+// orden cronológico (las más antiguas primero).
+func (m *Module) handleListarBitacora(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var params operclient.ListarBitacoraParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.bitacora.ListarBitacora(r.Context(), id, params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
 }
 
 // escribirJSON serializa v como respuesta JSON con el status dado.
