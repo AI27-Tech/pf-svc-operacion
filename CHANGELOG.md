@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## 2026:10:21 — E1-T6 (AI27-14): incidencias y estadías como condiciones ortogonales
+
+**Resumen:** se implementan las dos CONDICIONES ORTOGONALES al progreso del viaje (§C.2, P15): incidencias y estadías. Abrir o cerrar cualquiera de ellas NO cambia `viaje.estado` —son dimensiones ortogonales, no estados—. Un viaje puede tener a la vez una incidencia abierta y una estadía abierta. La incidencia reutiliza `viajes.condicion_viaje` (que AI27-16 ya lee para el cierre anticipado); la estadía estrena su propia tabla `viajes.estadia`. Ambos casos de uso viven en el módulo `viajes` (rol `op_viajes`), que ya es dueño de `condicion_viaje` y del outbox único de `viaje.*`.
+
+**Para quién:** para `bff` y los paneles internos que abren/resuelven incidencias y registran/cierran estadías; para `mensajeria`/`reportes` (consumidores de `viaje.condicion_abierta`/`viaje.condicion_cerrada`); y para AI27-16, cuyo cierre anticipado lee la condición `INCIDENCIA` que este ticket abre y cierra.
+
+**Incidencias:**
+- `internal/viajes/incidencia.go` (nuevo): `AbrirIncidencia` inserta la condición `INCIDENCIA` en `viajes.condicion_viaje` (`cerrada_en` NULL) con su detalle (`tipo_interno`, `descripcion`) y publica `viaje.condicion_abierta` por el outbox de `viajes`, todo en UNA transacción (P17). NO cambia `viaje.estado`. Pueden abrir `operador`, `supervisor`, `administrador`; `reaccion` NO (DEC-028) ni el cliente. Dos `INCIDENCIA` abiertas del mismo viaje las impide el índice único parcial `una_condicion_abierta_por_tipo`; la violación 23505 se traduce a **Conflicto (409)**, nunca a un 500. `ResolverIncidencia` cierra la condición (`cerrada_en` + `resuelta_en` derivado) y publica `viaje.condicion_cerrada`, en su tx; SOLO `supervisor` o `administrador` (un operador que abrió no puede resolver: rechazo por rol). El `estado` del contrato (`en_atencion`/`resuelta`) se DERIVA de `cerrada_en`, no se persiste.
+- `migrations/viajes/0004_incidencia_estadia.sql` (nuevo): `ALTER TABLE viajes.condicion_viaje ADD COLUMN tipo_interno, descripcion`. Los GRANT de `condicion_viaje` (`SELECT, INSERT, UPDATE` para `op_viajes`) ya estaban en `0002_grants`; agregar columnas no los cambia.
+
+**Estadías (DEC-038):**
+- `internal/viajes/estadia.go` (nuevo): `AbrirEstadia` fija `inicio = ahora` y deja `cierre` NULL, sin tocar `viaje.estado`; valida `motivo` y `eje_autorizacion` contra sus catálogos cerrados. `CerrarEstadia` (cuerpo vacío) fija `cierre = ahora`. `ListarEstadias` devuelve las estadías en orden de ocurrencia con cursor keyset sobre `(inicio, id)`. `CerrarEstadiaActivaPorReinicio` cierra la estadía activa (efecto del "reinicio de viaje", DEC-013) SIN ser transición de estado; idempotente.
+- Tabla `viajes.estadia (id, viaje_id, motivo, eje_autorizacion, inicio, cierre)` en `0004`, con `GRANT SELECT, INSERT, UPDATE TO op_viajes` (declarado explícito porque `0002_grants` revocó los defaults). **PROHIBIDO y cumplido:** NO hay columna/duración persistida, ni campo/bandera `prolongada`, ni umbral o parámetro. La DURACIÓN se DERIVA de `(inicio, cierre)` en la lectura.
+
+**Handlers y rutas (`operacion.go`):** `POST /incidencias`, `PATCH /incidencias/{iid}`, `POST /estadias`, `PATCH /estadias/{eid}`, `GET /estadias`, todas bajo el middleware `protegido`. Leen `id/iid/eid` con `r.PathValue` y el rol/actor de los claims. Los casos de uso son métodos del `viajes.Servicio` ya construido en `New` con el pool `op_viajes`: no se añade un servicio nuevo (la condición, su detalle y el outbox viven todos en el esquema `viajes`).
+
+**Tests de integración:**
+- `internal/viajes/incidencia_integration_test.go` (nuevo): abrir no cambia `viaje.estado` (se lee antes/después) y publica `viaje.condicion_abierta`; `reaccion` no puede abrir (DEC-028); operador no puede resolver (rechazo por rol) y supervisor sí (cierra + `viaje.condicion_cerrada`); dos incidencias abiertas → Conflicto por el índice; coexistencia incidencia + estadía; `tipo_interno` obligatorio.
+- `internal/viajes/estadia_integration_test.go` (nuevo): abrir no cambia estado; duración derivable de `(inicio, cierre)` sin capturarla; **NO existe** ninguna columna `prolongada`/`duracion`/umbral (verificado contra `information_schema.columns`); el reinicio cierra la estadía activa (idempotente); motivo/eje inválidos rechazados.
+- `internal/viajes/servicio_integration_test.go`: el `TRUNCATE` de `prepara` ahora incluye `viajes.estadia`.
+
+**No se tocó el contrato** (`pf-pkg-contracts`), ni el pin (sigue `v0.1.0-tracer.10`). Las formas `Incidencia`/`IncidenciaEntrada`/`ResolucionIncidenciaEntrada`/`Estadia`/`EstadiaEntrada`/`CierreEstadiaEntrada`/`PaginaEstadias` ya estaban generadas.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+**Archivos modificados:**
+- `migrations/viajes/0004_incidencia_estadia.sql` (nuevo)
+- `internal/viajes/incidencia.go` (nuevo)
+- `internal/viajes/estadia.go` (nuevo)
+- `internal/viajes/incidencia_integration_test.go` (nuevo)
+- `internal/viajes/estadia_integration_test.go` (nuevo)
+- `internal/viajes/servicio_integration_test.go`
+- `operacion.go`
+
 ## 2026:10:20 — E1-T8 (AI27-16): cierre del servicio
 
 **Resumen:** se implementa el cierre del viaje: se reemplazan las tres guardas diferidas de cierre (`EN_DESTINO`/`EN_DESCARGA`/`EN_TRANSITO → CERRADO`) por lógica real. El cierre exige un motivo del catálogo `normal | por_incidencia | bitacora`. El cierre normal (tras la última parada) es válido desde `EN_DESTINO`/`EN_DESCARGA`; el cierre anticipado (desde `EN_TRANSITO`) solo con motivo `por_incidencia`, solo por un rol operador interno autorizado (`jefe_operativo`/`administrador`, DEC-060 #1) y solo con una condición `INCIDENCIA` abierta (DEC-020 #6). Al cerrar se publica `viaje.cerrado` con el motivo en el payload, en la misma tx (P17), para que `mensajeria` decida la ventana de la conversación (3 días / 6 meses, DEC-030/041) sin volver a llamar a `operacion`.

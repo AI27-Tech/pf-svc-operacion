@@ -224,6 +224,14 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
 	mux.Handle("POST /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleRegistrarBitacora)))
 	mux.Handle("GET /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleListarBitacora)))
+	// Condiciones ortogonales (E1-T6): incidencias y estadías. Abrir/cerrar
+	// NINGUNA cambia viaje.estado (§C.2). Los sirve el módulo viajes (dueño de
+	// condicion_viaje y de la nueva tabla estadia, mismo rol op_viajes).
+	mux.Handle("POST /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleAbrirIncidencia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/incidencias/{iid}", protegido(http.HandlerFunc(m.handleResolverIncidencia)))
+	mux.Handle("POST /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleAbrirEstadia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/estadias/{eid}", protegido(http.HandlerFunc(m.handleCerrarEstadia)))
+	mux.Handle("GET /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleListarEstadias)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -373,6 +381,132 @@ func (m *Module) handleListarBitacora(w http.ResponseWriter, r *http.Request) {
 		params.Cursor = &cur
 	}
 	pag, err := m.bitacora.ListarBitacora(r.Context(), id, params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// handleAbrirIncidencia atiende POST /api/v1/viajes/{id}/incidencias: lee el tipo
+// interno y la descripción (IncidenciaEntrada) y delega en viajes, que abre la
+// condición ortogonal INCIDENCIA sin tocar viaje.estado. El rol del actor viaja
+// en los claims (operador/supervisor/administrador; reacción NO, DEC-028). 201.
+func (m *Module) handleAbrirIncidencia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.IncidenciaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	inc, err := m.viajes.AbrirIncidencia(r.Context(), id, body, rol)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, inc)
+}
+
+// handleResolverIncidencia atiende PATCH /api/v1/viajes/{id}/incidencias/{iid}:
+// cierra la condición INCIDENCIA (sin tocar viaje.estado) y publica
+// viaje.condicion_cerrada. SOLO supervisor o administrador (un operador que abrió
+// no puede resolver). Lee id/iid con r.PathValue.
+func (m *Module) handleResolverIncidencia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	iid, err := uuid.Parse(r.PathValue("iid"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de incidencia inválido"))
+		return
+	}
+	var body operclient.ResolucionIncidenciaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	inc, err := m.viajes.ResolverIncidencia(r.Context(), id, iid, body, rol)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, inc)
+}
+
+// handleAbrirEstadia atiende POST /api/v1/viajes/{id}/estadias: lee el motivo y el
+// eje de autorización (EstadiaEntrada) y delega en viajes, que abre la estadía
+// fijando inicio = ahora, sin tocar viaje.estado. 201 Created.
+func (m *Module) handleAbrirEstadia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.EstadiaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	est, err := m.viajes.AbrirEstadia(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, est)
+}
+
+// handleCerrarEstadia atiende PATCH /api/v1/viajes/{id}/estadias/{eid}: cierra la
+// estadía abierta fijando cierre = ahora (cuerpo vacío, CierreEstadiaEntrada), sin
+// tocar viaje.estado. Lee id/eid con r.PathValue.
+func (m *Module) handleCerrarEstadia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	eid, err := uuid.Parse(r.PathValue("eid"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de estadía inválido"))
+		return
+	}
+	// El cuerpo es vacío por contrato; no se decodifica nada de él.
+	est, err := m.viajes.CerrarEstadia(r.Context(), id, eid)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, est)
+}
+
+// handleListarEstadias atiende GET /api/v1/viajes/{id}/estadias: lee el cursor
+// opcional de la query y delega en viajes, que devuelve las estadías en orden de
+// ocurrencia. La duración NO viene en la respuesta: se deriva de inicio/cierre.
+func (m *Module) handleListarEstadias(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var params operclient.ListarEstadiasParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.viajes.ListarEstadias(r.Context(), id, params)
 	if err != nil {
 		escribirError(w, err)
 		return
