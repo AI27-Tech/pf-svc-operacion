@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026:10:20 — E1-T8 (AI27-16): cierre del servicio
+
+**Resumen:** se implementa el cierre del viaje: se reemplazan las tres guardas diferidas de cierre (`EN_DESTINO`/`EN_DESCARGA`/`EN_TRANSITO → CERRADO`) por lógica real. El cierre exige un motivo del catálogo `normal | por_incidencia | bitacora`. El cierre normal (tras la última parada) es válido desde `EN_DESTINO`/`EN_DESCARGA`; el cierre anticipado (desde `EN_TRANSITO`) solo con motivo `por_incidencia`, solo por un rol operador interno autorizado (`jefe_operativo`/`administrador`, DEC-060 #1) y solo con una condición `INCIDENCIA` abierta (DEC-020 #6). Al cerrar se publica `viaje.cerrado` con el motivo en el payload, en la misma tx (P17), para que `mensajeria` decida la ventana de la conversación (3 días / 6 meses, DEC-030/041) sin volver a llamar a `operacion`.
+
+**Para quién:** para `mensajeria` y `reportes` (consumidores de `viaje.cerrado`), para el panel del jefe operativo (E6-HU-033) y para `bff`, que exponen el cierre. Antes la arista a `CERRADO` devolvía 409 "no soportado todavía".
+
+**Cambios:**
+- `internal/viajes/transicion.go`: `Transicionar` ahora recibe el `rol` del actor (lo exige la guarda del cierre). Se quitan las tres guardas `guardaDiferida` de cierre del mapa `guardas`; el cierre se valida en `validarCierre` (dentro de la misma tx, porque necesita leer la base y el rol, lo que no cabe en la firma de una `guarda` pura). Se añade `hayIncidenciaAbierta` (lee `viajes.condicion_viaje`, `tipo='INCIDENCIA' AND cerrada_en IS NULL`). Al transicionar a `CERRADO` se publica `viaje.cerrado` (motivo en payload) además del `viaje.estado_cambiado` genérico.
+- `operacion.go`: `handleTransicionar` lee `claims.Rol` del contexto y lo pasa a `Transicionar` (mismo patrón que `handleAsignar` con `claims.Subject`).
+- `internal/viajes/transicion_integration_test.go`: se actualizan las llamadas existentes a la nueva firma de `Transicionar`.
+- `internal/viajes/cierre_integration_test.go` (nuevo): cierre normal tras la última parada (publica `viaje.cerrado` con motivo); anticipado por incidencia por operador OK; mismo intento por un cliente rechazado; anticipado sin incidencia rechazado; cerrar sin motivo rechazado; y verificación de que `viaje.cerrado` lleva el motivo en el payload (`payload->>'motivo_cierre'`), legible por el consumidor sin llamar a `operacion`.
+
+**Brecha de contrato reportada (no resuelta aquí):** `TransicionEntrada` no tiene un campo `motivo_cierre` con el catálogo `normal|por_incidencia|bitacora`; solo tiene `causa` (texto libre). Por instrucción del ticket NO se tocó el contrato. Como puente, el motivo de cierre se lee de `causa` cuando `a_estado = CERRADO` y se valida en el servicio. Detalle y propuesta en `.scratch/e1-t8-cierre-viaje/brecha-motivo-de-cierre.md`.
+
+**Aproximación documentada (pendiente de Producto):** "última parada" se aproxima por el estado de origen (`EN_DESTINO`/`EN_DESCARGA`). No existe un puntero de parada actual en el esquema y la condición exacta de "listo para cerrar" no está fijada en las fuentes (E6-HU-033); no se verifica que sea literalmente la última parada de la ruta.
+
+**Coordinación con AI27-14 (E1-T6):** ambos usan `viajes.condicion_viaje` para la incidencia abierta; el cierre anticipado la lee como precondición, E1-T6 la abre y la cierra.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+
+**Archivos modificados:**
+- `internal/viajes/transicion.go`
+- `operacion.go`
+- `internal/viajes/transicion_integration_test.go`
+- `internal/viajes/cierre_integration_test.go` (nuevo)
+
 ## 2026:10:20
 
 **Resumen:** E1-T5 (AI27-13): caso de uso de bitácora del viaje en `operacion`. Registrar una entrada y listar las entradas de un viaje en orden cronológico `(viaje_id, creado_en)`. La bitácora es append-only: no hay edición ni borrado de entradas; una corrección es una entrada nueva. Consume la superficie de bitácora ya contratada en `pf-pkg-contracts` (disponible desde tracer.10).
