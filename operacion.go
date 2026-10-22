@@ -38,6 +38,7 @@ import (
 	"github.com/AI27-Tech/pf-svc-operacion/internal/bitacora"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/descargas"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -98,6 +99,7 @@ type Module struct {
 	viajes     *viajes.Servicio
 	asignacion *asignacion.Servicio
 	bitacora   *bitacora.Servicio
+	descargas  *descargas.Servicio
 	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
 	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
 	relay worker.Worker
@@ -130,6 +132,10 @@ func New(p Pools, d Deps) (*Module, error) {
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
 		bitacora:   bitacora.NewServicio(p.Bitacora),
+		// registrarDescargaViaje (AI27-80): lee el viaje con op_viajes y escribe el
+		// rastro de auditoría con el rol dueño op_auditoria vía el interceptor. Dos
+		// pools, uno por rol (I1); sin GRANT cruzado a op_viajes (ADR 31/33).
+		descargas: descargas.NewServicio(p.Viajes, p.Auditoria),
 	}
 	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
@@ -232,6 +238,10 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleAbrirEstadia)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/estadias/{eid}", protegido(http.HandlerFunc(m.handleCerrarEstadia)))
 	mux.Handle("GET /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleListarEstadias)))
+	// Descarga del expediente (AI27-80, E1-T7): bff compone la descarga e invoca a
+	// operacion para DEJAR el rastro de auditoría (el rastro lo escribe operacion
+	// en su transacción, no el bff). Sin cuerpo; responde el Viaje descargado.
+	mux.Handle("POST /api/v1/viajes/{id}/descargas", protegido(http.HandlerFunc(m.handleRegistrarDescarga)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -512,6 +522,29 @@ func (m *Module) handleListarEstadias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	escribirJSON(w, http.StatusOK, pag)
+}
+
+// handleRegistrarDescarga atiende POST /api/v1/viajes/{id}/descargas
+// (registrarDescargaViaje, AI27-80): deja el rastro de auditoría de la descarga
+// del expediente y responde el Viaje descargado. No tiene cuerpo. El actor (quién
+// descargó) sale de los claims del token; el viaje, de {id}. El registro se
+// escribe con el rol dueño op_auditoria vía el interceptor, append-only.
+func (m *Module) handleRegistrarDescarga(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	v, err := m.descargas.Registrar(r.Context(), id, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, v)
 }
 
 // escribirJSON serializa v como respuesta JSON con el status dado.
