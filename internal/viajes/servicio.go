@@ -228,6 +228,14 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 		return nil, err
 	}
 
+	// Incidencias abiertas con su tipo_interno (AI27-59). Es CONSUMO INTERNO de
+	// bff: el curado de la categoría para el cliente lo hace bff (DEC-006), no
+	// operacion. Aditivo y ortogonal a CondicionesActivas, que se conserva.
+	incs, err := s.incidenciasAbiertas(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+
 	cid := operclient.Id(clienteID)
 	return &operclient.ViajeDetalle{
 		Viaje: operclient.Viaje{
@@ -241,6 +249,7 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 			CreadoEn:          creado,
 		},
 		CondicionesActivas: conds,
+		IncidenciasActivas: &incs,
 	}, nil
 }
 
@@ -413,6 +422,47 @@ func (s *Servicio) condicionesAbiertas(ctx context.Context, tx pgx.Tx, viajeID o
 			return nil, fmt.Errorf("operacion: escanear condicion: %w", err)
 		}
 		out = append(out, operclient.CondicionAbierta{Tipo: operclient.CondicionViaje(tipo), AbiertaEn: ab})
+	}
+	return out, rows.Err()
+}
+
+// incidenciasAbiertas lee las incidencias abiertas de un viaje con su
+// tipo_interno (AI27-59). Es la misma fila de viajes.condicion_viaje que
+// condicionesAbiertas, pero filtrada a tipo='INCIDENCIA' y proyectando el
+// tipo_interno (consumo interno de bff, DEC-006) más el id para que bff pueda
+// referenciar cada incidencia. Una incidencia que está en la lista está abierta
+// por definición, así que su estado es siempre en_atencion (una resuelta tiene
+// cerrada_en y queda fuera del filtro). Nunca nil: el campo es opcional en el
+// contrato, pero devolvemos una lista vacía (no nil) para una forma estable.
+func (s *Servicio) incidenciasAbiertas(ctx context.Context, tx pgx.Tx, viajeID operclient.Id) ([]operclient.IncidenciaActiva, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id, tipo_interno, abierta_en FROM viajes.condicion_viaje
+		  WHERE viaje_id = $1 AND tipo = 'INCIDENCIA' AND cerrada_en IS NULL
+		  ORDER BY abierta_en`, viajeID)
+	if err != nil {
+		return nil, fmt.Errorf("operacion: leer incidencias abiertas: %w", err)
+	}
+	defer rows.Close()
+	out := []operclient.IncidenciaActiva{}
+	for rows.Next() {
+		var (
+			id          uuid.UUID
+			tipoInterno *string
+			ab          time.Time
+		)
+		if err := rows.Scan(&id, &tipoInterno, &ab); err != nil {
+			return nil, fmt.Errorf("operacion: escanear incidencia abierta: %w", err)
+		}
+		ti := ""
+		if tipoInterno != nil {
+			ti = *tipoInterno
+		}
+		out = append(out, operclient.IncidenciaActiva{
+			Id:          id,
+			TipoInterno: ti,
+			Estado:      operclient.IncidenciaActivaEstadoEnAtencion,
+			AbiertaEn:   ab.UTC(),
+		})
 	}
 	return out, rows.Err()
 }

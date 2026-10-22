@@ -118,7 +118,7 @@ func (s *Servicio) AbrirIncidencia(ctx context.Context, viajeID operclient.Id, i
 		Id:          id,
 		ViajeId:     viajeID,
 		TipoInterno: in.TipoInterno,
-		Estado:      operclient.EnAtencion,
+		Estado:      operclient.IncidenciaEstadoEnAtencion,
 		AbiertaEn:   abiertaEn.UTC(),
 	}, nil
 }
@@ -200,7 +200,7 @@ func (s *Servicio) ResolverIncidencia(ctx context.Context, viajeID, incidenciaID
 		Id:          incidenciaID,
 		ViajeId:     viajeID,
 		TipoInterno: ti,
-		Estado:      operclient.Resuelta,
+		Estado:      operclient.IncidenciaEstadoResuelta,
 		AbiertaEn:   abiertaEn.UTC(),
 		ResueltaEn:  &ahora,
 	}, nil
