@@ -112,6 +112,10 @@ type Module struct {
 	// consumidorCatalogos es el worker durable de catalogo.actualizado que
 	// invalida la caché de aptitud (E5-T5). nil sin Subscriber.
 	consumidorCatalogos worker.Worker
+	// consumidorEmergencia es el worker durable de emergencia.nota_agregada que
+	// proyecta cada nota de emergencia al histórico/bitácora del viaje (E7,
+	// tracer.17, DEC-100). nil sin Subscriber.
+	consumidorEmergencia worker.Worker
 }
 
 // umbralFrescura es la ventana tras la cual el canal de revocación se considera
@@ -188,6 +192,27 @@ func New(p Pools, d Deps) (*Module, error) {
 			return nil, err
 		}
 		m.consumidorCatalogos = w
+	}
+	// Consumidor durable de emergencia.nota_agregada (E7, tracer.17, DEC-100):
+	// proyecta cada nota de emergencia al histórico/bitácora del viaje. Primer
+	// consumidor durable RESTRINGIDO de operacion (el evento viaja por el tema
+	// restringido). La idempotencia es durable (RegistrarDesdeEvento por
+	// evento_id), no en memoria. Solo con Subscriber.
+	if d.Subscriber != nil {
+		cons := consumidores.NuevoConsumidorEmergenciaNota(m.bitacora)
+		handler := func(ctx context.Context, s bus.Sobre) error {
+			return cons.Procesar(ctx, s)
+		}
+		w, err := d.Subscriber.Subscribe(
+			"operacion-emergencia",
+			bus.SensibilidadRestringida,
+			[]string{consumidores.TipoEmergenciaNotaAgregada},
+			handler,
+		)
+		if err != nil {
+			return nil, err
+		}
+		m.consumidorEmergencia = w
 	}
 	return m, nil
 }
@@ -556,6 +581,9 @@ func (m *Module) Workers() []worker.Worker {
 	}
 	if m.consumidorCatalogos != nil {
 		ws = append(ws, m.consumidorCatalogos)
+	}
+	if m.consumidorEmergencia != nil {
+		ws = append(ws, m.consumidorEmergencia)
 	}
 	return ws
 }

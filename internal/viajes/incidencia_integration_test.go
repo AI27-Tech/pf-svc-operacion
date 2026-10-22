@@ -40,7 +40,7 @@ func TestAbrirIncidenciaNoCambiaEstado(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
-	if inc.Estado != operclient.EnAtencion {
+	if inc.Estado != operclient.IncidenciaEstadoEnAtencion {
 		t.Errorf("estado de la incidencia: got %q, want en_atencion", inc.Estado)
 	}
 	if inc.TipoInterno != "robo_tentativa" {
@@ -117,7 +117,7 @@ func TestResolverIncidenciaSoloSupervisorOAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolverIncidencia (supervisor): %v", err)
 	}
-	if out.Estado != operclient.Resuelta {
+	if out.Estado != operclient.IncidenciaEstadoResuelta {
 		t.Errorf("estado tras resolver: got %q, want resuelta", out.Estado)
 	}
 	if out.ResueltaEn == nil {

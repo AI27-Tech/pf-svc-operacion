@@ -139,3 +139,41 @@ func TestAppendOnlyEnLaBase(t *testing.T) {
 		t.Error("DELETE de una entrada debió fallar: la bitácora es append-only")
 	}
 }
+
+// TestRegistrarDesdeEventoEsIdempotente comprueba contra Postgres real que
+// proyectar la misma nota (mismo evento_id) dos veces inserta UNA sola entrada:
+// la idempotencia durable del histórico (migración 0003, E7/DEC-100). Una
+// reentrega del evento tras un reinicio no duplica el histórico.
+func TestRegistrarDesdeEventoEsIdempotente(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	viaje := uuid.New().String()
+	evento := "nota-" + uuid.New().String()
+
+	ins1, err := svc.RegistrarDesdeEvento(ctx, viaje, evento, "bloqueo en la caseta", "")
+	if err != nil {
+		t.Fatalf("primera proyección: %v", err)
+	}
+	if !ins1 {
+		t.Fatal("la primera proyección debió insertar")
+	}
+
+	// Reentrega del mismo evento: no inserta (idempotente), no es error.
+	ins2, err := svc.RegistrarDesdeEvento(ctx, viaje, evento, "bloqueo en la caseta", "")
+	if err != nil {
+		t.Fatalf("reentrega: %v", err)
+	}
+	if ins2 {
+		t.Fatal("la reentrega del mismo evento no debió insertar un segundo")
+	}
+
+	// La bitácora del viaje tiene exactamente una entrada.
+	pag, err := svc.ListarBitacora(ctx, operclient.Id(uuid.MustParse(viaje)), operclient.ListarBitacoraParams{})
+	if err != nil {
+		t.Fatalf("ListarBitacora: %v", err)
+	}
+	if len(pag.Items) != 1 {
+		t.Fatalf("el histórico debe tener 1 entrada tras la reentrega, tiene %d", len(pag.Items))
+	}
+}
