@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## 2026:10:22 — AI27-59 / AI27-80: incidencias con `tipo_interno` en la lectura del viaje y auditoría de la descarga del expediente
+
+**Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.10` a `v0.1.0-tracer.16` y se implementa lo que `operacion` debe exponer para cerrar las dos brechas del sprint. **Parte A (AI27-59):** la lectura del viaje expone ahora las incidencias abiertas con su `tipo_interno`, para que `bff` componga la categoría curada del cliente (DEC-006). **Parte B (AI27-80):** el comando `registrarDescargaViaje` deja el rastro de auditoría de la descarga del expediente, escrito por `operacion` con el rol dueño `op_auditoria` vía el interceptor, append-only. No se tocó `pf-pkg-contracts`.
+
+**Para quién:** para `bff`, que quedaba bloqueado en ambas pantallas hasta el contrato: AI27-59 (vista curada de incidencia del cliente, que mapea `tipo_interno` → categoría) y AI27-80 (descarga del expediente, cuyo rastro de auditoría lo escribe `operacion` en su transacción, no `bff`).
+
+**Pin (PASO 0):**
+- `go.mod`/`go.sum`: `api-client-go` de `v0.1.0-tracer.10` a `v0.1.0-tracer.16`. El salto renombró los enums de `Incidencia.Estado` (`EnAtencion`/`Resuelta` → `IncidenciaEstadoEnAtencion`/`IncidenciaEstadoResuelta`), que `internal/viajes/incidencia.go` y su test ya usaban; se actualizaron las referencias. El contrato agregó además `ViajeDetalle.incidencias_activas []IncidenciaActiva` (opcional, aditivo) y el `operationId` `registrarDescargaViaje`.
+
+**Parte A — incidencias con `tipo_interno` en la lectura del viaje (AI27-59):**
+- `internal/viajes/servicio.go`: nuevo helper `incidenciasAbiertas(ctx, tx, viajeID)` que lee `id, tipo_interno, abierta_en` de `viajes.condicion_viaje WHERE tipo='INCIDENCIA' AND cerrada_en IS NULL` y devuelve `[]operclient.IncidenciaActiva` con `estado = en_atencion` (una incidencia en la lista está abierta por definición), nunca `nil` (lista vacía como forma estable). `Obtener` rellena el nuevo `ViajeDetalle.IncidenciasActivas` sin tocar `CondicionesActivas` (dimensión aditiva: la misma incidencia abierta aparece en ambas). El dato ya estaba en la base (AI27-14, `op_viajes` ya tiene SELECT sobre esa tabla): no hay captura nueva ni cambio de permisos. Fluye a `bff` por `ObtenerViaje` (`ConsultasAPI`), sin endpoint nuevo.
+- `internal/viajes/incidencia_integration_test.go`: nuevo `TestIncidenciasActivasExponeTipoInterno` (sin incidencias → lista vacía; tras abrir → `tipo_interno`/`id`/`estado` correctos y coexistencia con `CondicionesActivas`; tras resolver → desaparece de la lista).
+
+**Parte B — `registrarDescargaViaje` deja el rastro de auditoría (AI27-80):**
+- `internal/descargas/servicio.go` (nuevo): `Servicio.Registrar(ctx, viajeID, actorID)` con DOS pools, uno por rol (I1): lee el viaje con `op_viajes` (SELECT sobre su propio esquema; da el `404` y arma el `Viaje` de la respuesta) y escribe EXACTAMENTE un registro en `auditoria.registro_auditoria` con el rol dueño `op_auditoria` vía `auditoria.Interceptar` DENTRO de una transacción (acción `descarga_expediente`, actor = `claims.Subject`, viaje = `{id}`, momento = `now()`). Un viaje inexistente da `404` y NO escribe registro. **No se otorga GRANT de escritura a `op_viajes` ni se abre una segunda excepción de GRANT cruzado** (la única es la de `op_asignacion`, ADR 31/33): el camino es el rol dueño `op_auditoria`, que tiene `INSERT` por diseño; sin ADR. Append-only: el esquema no otorga `UPDATE`/`DELETE` a nadie.
+- `operacion.go`: se construye `descargas.NewServicio(p.Viajes, p.Auditoria)` en `New` (el pool `op_auditoria`, antes sin uso en ningún caso de uso, ahora alimenta este comando); se monta `POST /api/v1/viajes/{id}/descargas` bajo `protegido` y se agrega `handleRegistrarDescarga`, que lee `{id}` con `r.PathValue` y el actor de `auth.ClaimsFromContext(ctx).Subject`, y responde `200` con el `Viaje`.
+- `internal/descargas/servicio_integration_test.go` (nuevo): una llamada escribe exactamente un registro con actor/viaje/acción/momento y devuelve el `Viaje`; viaje inexistente → `404` sin registro; append-only verificado al nivel del GRANT (`UPDATE`/`DELETE` con `op_auditoria` fallan y el registro queda intacto).
+
+**No se tocó el contrato** (`pf-pkg-contracts`). Las formas `IncidenciaActiva`, `ViajeDetalle.incidencias_activas` y `registrarDescargaViaje` ya vienen generadas en `tracer.16`.
+
+**Verificado:** `go build ./...`, `go vet ./...` y `go test ./...` en verde (todos los paquetes pasan; los tests de integración se saltan sin `OPERACION_TEST_DB`).
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `internal/viajes/servicio.go`
+- `internal/viajes/incidencia.go`
+- `internal/viajes/incidencia_integration_test.go`
+- `internal/descargas/servicio.go` (nuevo)
+- `internal/descargas/servicio_integration_test.go` (nuevo)
+- `operacion.go`
+
 ## 2026:10:21 — E1-T6 (AI27-14): incidencias y estadías como condiciones ortogonales
 
 **Resumen:** se implementan las dos CONDICIONES ORTOGONALES al progreso del viaje (§C.2, P15): incidencias y estadías. Abrir o cerrar cualquiera de ellas NO cambia `viaje.estado` —son dimensiones ortogonales, no estados—. Un viaje puede tener a la vez una incidencia abierta y una estadía abierta. La incidencia reutiliza `viajes.condicion_viaje` (que AI27-16 ya lee para el cierre anticipado); la estadía estrena su propia tabla `viajes.estadia`. Ambos casos de uso viven en el módulo `viajes` (rol `op_viajes`), que ya es dueño de `condicion_viaje` y del outbox único de `viaje.*`.

@@ -212,6 +212,78 @@ func TestCoexistenciaIncidenciaYEstadia(t *testing.T) {
 	}
 }
 
+// TestIncidenciasActivasExponeTipoInterno — AI27-59: una incidencia abierta
+// aparece en ViajeDetalle.IncidenciasActivas con su tipo_interno (consumo interno
+// de bff, DEC-006) y estado en_atencion; al resolverla, desaparece de la lista.
+// CondicionesActivas y IncidenciasActivas son dimensiones aditivas: la misma
+// incidencia abierta aparece en ambas mientras está abierta.
+func TestIncidenciasActivasExponeTipoInterno(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearInterno(t, ctx, svc)
+
+	// Sin incidencias: IncidenciasActivas es una lista vacía (no nil), forma
+	// estable para bff.
+	det, err := svc.Obtener(ctx, v.Id)
+	if err != nil {
+		t.Fatalf("Obtener (sin incidencias): %v", err)
+	}
+	if det.IncidenciasActivas == nil {
+		t.Fatal("IncidenciasActivas no debe ser nil: se espera una lista vacía")
+	}
+	if len(*det.IncidenciasActivas) != 0 {
+		t.Errorf("IncidenciasActivas sin incidencias: got %d, want 0", len(*det.IncidenciasActivas))
+	}
+
+	// Abrir una incidencia con un tipo_interno conocido.
+	inc, err := svc.AbrirIncidencia(ctx, v.Id,
+		operclient.IncidenciaEntrada{TipoInterno: "robo_tentativa", Descripcion: ptrS("intento en caseta")}, "operador")
+	if err != nil {
+		t.Fatalf("AbrirIncidencia: %v", err)
+	}
+
+	// La lectura del viaje la expone con su tipo_interno, su id y estado
+	// en_atencion (si está en la lista, está abierta).
+	det, err = svc.Obtener(ctx, v.Id)
+	if err != nil {
+		t.Fatalf("Obtener (con incidencia): %v", err)
+	}
+	if det.IncidenciasActivas == nil || len(*det.IncidenciasActivas) != 1 {
+		t.Fatalf("IncidenciasActivas: got %+v, want exactamente 1", det.IncidenciasActivas)
+	}
+	ia := (*det.IncidenciasActivas)[0]
+	if ia.TipoInterno != "robo_tentativa" {
+		t.Errorf("tipo_interno expuesto: got %q, want robo_tentativa", ia.TipoInterno)
+	}
+	if ia.Estado != operclient.IncidenciaActivaEstadoEnAtencion {
+		t.Errorf("estado: got %q, want en_atencion", ia.Estado)
+	}
+	if ia.Id != inc.Id {
+		t.Errorf("id de la incidencia activa: got %v, want %v", ia.Id, inc.Id)
+	}
+	if ia.AbiertaEn.IsZero() {
+		t.Error("abierta_en no debió venir en cero")
+	}
+	// Dimensión aditiva: la misma incidencia abierta sigue en CondicionesActivas.
+	if len(det.CondicionesActivas) != 1 || det.CondicionesActivas[0].Tipo != operclient.INCIDENCIA {
+		t.Errorf("condiciones activas (se conservan): got %+v, want una INCIDENCIA", det.CondicionesActivas)
+	}
+
+	// Al resolverla (supervisor), desaparece de IncidenciasActivas.
+	if _, err := svc.ResolverIncidencia(ctx, v.Id, inc.Id,
+		operclient.ResolucionIncidenciaEntrada{Resolucion: "grúa en sitio"}, "supervisor"); err != nil {
+		t.Fatalf("ResolverIncidencia: %v", err)
+	}
+	det, err = svc.Obtener(ctx, v.Id)
+	if err != nil {
+		t.Fatalf("Obtener (tras resolver): %v", err)
+	}
+	if det.IncidenciasActivas == nil || len(*det.IncidenciasActivas) != 0 {
+		t.Errorf("IncidenciasActivas tras resolver: got %+v, want lista vacía", det.IncidenciasActivas)
+	}
+}
+
 // TestAbrirIncidenciaTipoInternoObligatorio — tipo_interno vacío se rechaza por
 // validación, sin tocar la base.
 func TestAbrirIncidenciaTipoInternoObligatorio(t *testing.T) {
