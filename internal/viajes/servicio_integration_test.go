@@ -42,7 +42,7 @@ func prepara(t *testing.T, ctx context.Context) *viajes.Servicio {
 		dbtest.Exec(t, ctx, admin, string(sql))
 	}
 	dbtest.Exec(t, ctx, admin,
-		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.transicion_viaje, viajes.outbox")
+		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox")
 
 	pool, cerrarPool := dbtest.PoolAs(t, ctx, "op_viajes", "viajes")
 	t.Cleanup(cerrarPool)
