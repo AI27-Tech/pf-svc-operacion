@@ -109,6 +109,46 @@ func (s *Servicio) RegistrarEntrada(ctx context.Context, viajeID operclient.Id, 
 	}, nil
 }
 
+// RegistrarDesdeEvento proyecta al histórico/bitácora del viaje una entrada
+// originada por un evento de dominio (p. ej. una nota de emergencia copiada al
+// histórico, DEC-100 punto 1). Es idempotente por eventoID: reentregar el mismo
+// evento no inserta una segunda entrada (índice único parcial
+// entrada_por_evento_idx, migración 0003). Devuelve true si insertó, false si el
+// evento ya estaba proyectado.
+//
+// autorID es el actor del evento (vacío ⇒ NULL). No audita ni publica: la
+// bitácora no tiene outbox ni GRANT a auditoria (igual que RegistrarEntrada).
+func (s *Servicio) RegistrarDesdeEvento(ctx context.Context, viajeID, eventoID, texto, autorID string) (bool, error) {
+	if strings.TrimSpace(texto) == "" {
+		return false, platformerrors.NewValidacion("operacion: el texto de la entrada de bitácora es obligatorio")
+	}
+	if strings.TrimSpace(eventoID) == "" {
+		return false, platformerrors.NewValidacion("operacion: falta el evento_id de la entrada proyectada")
+	}
+
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// INSERT idempotente: si el evento_id ya existe, ON CONFLICT no inserta y
+	// RowsAffected queda en 0. Así una reentrega del evento es un no-op durable.
+	ct, err := tx.Exec(ctx,
+		`INSERT INTO bitacora.entrada_bitacora (viaje_id, texto, autor_id, evento_id)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (evento_id) WHERE evento_id IS NOT NULL DO NOTHING`,
+		viajeID, texto, nullsiVacio(autorID), eventoID)
+	if err != nil {
+		return false, fmt.Errorf("operacion: registrar entrada de bitácora desde evento: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("operacion: commit registrar entrada desde evento: %w", err)
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
 // ListarBitacora devuelve las entradas de un viaje en orden cronológico por
 // (viaje_id, creado_en) —las más antiguas primero—, con paginación por cursor
 // keyset sobre (creado_en, id). El orden cronológico es el natural de una
