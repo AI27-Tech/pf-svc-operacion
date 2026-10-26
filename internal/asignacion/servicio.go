@@ -161,7 +161,9 @@ func (s *Servicio) Asignar(ctx context.Context, viajeID operclient.Id, in opercl
 	for _, u := range in.UnidadesIds {
 		unidades = append(unidades, operclient.UnidadAsignada{UnidadId: u, Aptitud: []operclient.AptitudRecurso{}})
 	}
-	return &operclient.Asignacion{Unidades: unidades, ViajeId: viajeID}, nil
+	// Estado: la asignación acaba de transicionar el viaje APROBADO→ASIGNADO en
+	// la misma tx; se afirma en el dato (tracer.20) en vez de inferirlo del éxito.
+	return &operclient.Asignacion{Unidades: unidades, ViajeId: viajeID, Estado: operclient.ASIGNADO}, nil
 }
 
 // Reasignar cambia la escolta de un viaje YA asignado, atómicamente: libera la
@@ -292,7 +294,9 @@ func (s *Servicio) Reasignar(ctx context.Context, viajeID operclient.Id, in oper
 	for _, u := range in.UnidadesIds {
 		unidades = append(unidades, operclient.UnidadAsignada{UnidadId: u, Aptitud: []operclient.AptitudRecurso{}})
 	}
-	return &operclient.Asignacion{Unidades: unidades, ViajeId: viajeID}, nil
+	// Estado: la reasignación NO transiciona el viaje (ya está ASIGNADO o más
+	// avanzado); se afirma el estado actual ya cargado, no uno fijo.
+	return &operclient.Asignacion{Unidades: unidades, ViajeId: viajeID, Estado: operclient.EstadoViaje(estado)}, nil
 }
 
 // esViolacionExclusion detecta la violación de la restricción de exclusión GiST
