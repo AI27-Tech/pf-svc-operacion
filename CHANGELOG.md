@@ -1,6 +1,17 @@
 # CHANGELOG
 
-## 2026:10:22 — AI27-59 / AI27-80: incidencias con `tipo_interno` en la lectura del viaje y auditoría de la descarga del expediente
+## 2026-10-27 — tracer.20: `estado` en la respuesta de asignación/reasignación (E8-T11)
+
+**Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.17` a `v0.1.0-tracer.20` y se rellena el campo `estado`, nuevo requerido en `Asignacion`, en las dos respuestas que lo construyen. El contrato de tracer.20 añade `Asignacion.estado` (referencia a `EstadoViaje`) para que el consumidor afirme el estado en el dato en vez de inferirlo del éxito de la operación (DEC-101). Aditivo: la respuesta de `asignarRecursos` ya era `200`.
+
+**Para quién:** para `bff` y el panel interno (E8-T11), que al poblar el selector y asignar un viaje necesitan afirmar `ASIGNADO` sin inferirlo. Sin este relleno el pin compila pero emite `"estado":""` en runtime, violando el contrato.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` de `v0.1.0-tracer.17` a `v0.1.0-tracer.20`. Sin renombrados de enum que afecten el código (se verificó con `go build`/`go vet`).
+- `internal/asignacion/servicio.go`: la respuesta de `Asignar` fija `Estado: ASIGNADO` (la tx acaba de transicionar APROBADO→ASIGNADO en la misma transacción); la de `Reasignar` fija el estado actual ya cargado (`EstadoViaje(estado)`), porque la reasignación no transiciona.
+- `internal/asignacion/servicio_integration_test.go`: `TestAsignarEscolta` y `TestReasignarEscolta` afirman ahora `out.Estado == ASIGNADO`.
+
+
 
 **Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.10` a `v0.1.0-tracer.16` y se implementa lo que `operacion` debe exponer para cerrar las dos brechas del sprint. **Parte A (AI27-59):** la lectura del viaje expone ahora las incidencias abiertas con su `tipo_interno`, para que `bff` componga la categoría curada del cliente (DEC-006). **Parte B (AI27-80):** el comando `registrarDescargaViaje` deja el rastro de auditoría de la descarga del expediente, escrito por `operacion` con el rol dueño `op_auditoria` vía el interceptor, append-only. No se tocó `pf-pkg-contracts`.
 
