@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-10-27 — E6-T3: bitácora, auditoría y descarga en la superficie en proceso (ConsultasAPI)
+
+**Resumen:** `ConsultasAPI` (la superficie síncrona que `bff` consume en proceso vía `core`) gana los tres métodos que su puerto `OperacionPort` ya exigía pero que solo existían como handlers HTTP: `ListarBitacora`, `ConsultarAuditoria` y `RegistrarDescargaViaje`. Sin ellos, `core` no podía cablear el adaptador en proceso `bff→operacion` contra un `bff` reciente (su puerto tiene seis métodos; la fachada exponía tres). Cierra esa brecha de integración de E6-T3.
+
+**Para quién:** para `pf-svc-core`, que compone la descarga del expediente de UN viaje (E6-T3, ADR 27) en proceso: `bff` agota las páginas de bitácora y auditoría de `operacion` y le pide dejar el rastro de la descarga. El adaptador HTTP de esas rutas ya existía; faltaba la paridad en proceso (I3).
+
+**Cambios:**
+- `internal/auditoria/consulta.go` (nuevo): `ServicioConsulta.Consultar(ctx, viajeID, params)` — lee `auditoria.registro_auditoria` con el rol `op_auditoria` (que ya tiene `SELECT`), paginado por cursor keyset sobre `(ocurrido_en, id)`, orden cronológico. Mapea `modulo`→`entidad`, `viaje_id`→`entidad_id`, `actor_id`→`actor`, y extrae `de`/`a` del `detalle` JSONB cuando el registro fue una transición de estado (opcionales). El paquete `auditoria` tenía solo el interceptor de escritura; ahora tiene también la lectura.
+- `operacion.go`: campo `auditoriaConsulta` en `Module` (construido en `New` sobre `p.Auditoria`); los tres métodos nuevos en `ConsultasAPI` + impl. `ListarBitacora` y `RegistrarDescargaViaje` delegan en los MISMOS casos de uso que los handlers HTTP (`m.bitacora`, `m.descargas`), con el actor de la descarga sacado de los claims del ctx (I3, paridad con el handler). `ConsultarAuditoria` delega en el servicio nuevo.
+- `consultas_test.go`: el interface local `puertoOperacionBFF` (que fija la forma contra el puerto del `bff` en compilación) gana los tres métodos.
+- `internal/auditoria/consulta_integration_test.go` (nuevo): orden+mapeo (incluido `de`/`a` del detalle), paginación por cursor (51→50+1), página vacía. Verde contra Postgres real.
+
+**Verificación:** `go build/vet ./...`, `go test ./...` con DB (serializado por advisory lock), `arch-test` (sin aristas nuevas: `ConsultarAuditoria` lee del pool propio `op_auditoria`, no cruza a otro servicio) y `go build ./cmd/api` (I5). `SELECT` sobre `registro_auditoria` ya lo tenía `op_auditoria` (0002_grants): no toca migraciones ni grants.
+
 ## 2026-10-27 — tracer.20: `estado` en la respuesta de asignación/reasignación (E8-T11)
 
 **Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.17` a `v0.1.0-tracer.20` y se rellena el campo `estado`, nuevo requerido en `Asignacion`, en las dos respuestas que lo construyen. El contrato de tracer.20 añade `Asignacion.estado` (referencia a `EstadoViaje`) para que el consumidor afirme el estado en el dato en vez de inferirlo del éxito de la operación (DEC-101). Aditivo: la respuesta de `asignarRecursos` ya era `200`.

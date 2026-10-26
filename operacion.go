@@ -34,6 +34,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/bitacora"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
@@ -100,6 +101,9 @@ type Module struct {
 	asignacion *asignacion.Servicio
 	bitacora   *bitacora.Servicio
 	descargas  *descargas.Servicio
+	// auditoriaConsulta lee la bitácora probatoria para la composición del
+	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
+	auditoriaConsulta *auditoria.ServicioConsulta
 	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
 	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
 	relay worker.Worker
@@ -140,6 +144,9 @@ func New(p Pools, d Deps) (*Module, error) {
 		// rastro de auditoría con el rol dueño op_auditoria vía el interceptor. Dos
 		// pools, uno por rol (I1); sin GRANT cruzado a op_viajes (ADR 31/33).
 		descargas: descargas.NewServicio(p.Viajes, p.Auditoria),
+		// Consulta de la auditoría probatoria para componer la descarga (E6-T3).
+		// Lee con op_auditoria (SELECT sobre registro_auditoria); no escribe.
+		auditoriaConsulta: auditoria.NewServicioConsulta(p.Auditoria),
 	}
 	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
@@ -647,6 +654,12 @@ type ConsultasAPI interface {
 	CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error)
 	ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error)
 	ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error)
+	// ListarBitacora, ConsultarAuditoria y RegistrarDescargaViaje sostienen la
+	// composición del expediente de descarga de UN viaje (E6-T3, ADR 27): bff
+	// agota las páginas de bitácora y auditoría y deja el rastro de la descarga.
+	ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error)
+	ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error)
+	RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
 }
 
 type consultas struct {
@@ -669,4 +682,26 @@ func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarVi
 
 func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
 	return c.m.viajes.Obtener(ctx, id)
+}
+
+// ListarBitacora reenvía al caso de uso de bitácora (mismo que el handler HTTP,
+// I3). El cursor ya viene armado en params.
+func (c *consultas) ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error) {
+	return c.m.bitacora.ListarBitacora(ctx, id, params)
+}
+
+// ConsultarAuditoria reenvía al servicio de consulta de auditoría (op_auditoria).
+func (c *consultas) ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error) {
+	return c.m.auditoriaConsulta.Consultar(ctx, id, params)
+}
+
+// RegistrarDescargaViaje deja el rastro de la descarga y devuelve el Viaje. El
+// actor sale de los claims del ctx (igual que el handler HTTP, I3); nil-safe:
+// sin claims el actor queda vacío (autor_id NULL), no es error.
+func (c *consultas) RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error) {
+	var actor string
+	if claims := auth.ClaimsFromContext(ctx); claims != nil {
+		actor = claims.Subject
+	}
+	return c.m.descargas.Registrar(ctx, id, actor)
 }
