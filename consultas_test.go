@@ -17,6 +17,9 @@ type puertoOperacionBFF interface {
 	CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error)
 	ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error)
 	ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error)
+	ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error)
+	ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error)
+	RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
 }
 
 // TestConsultasSatisfaceElPuertoDeBFF comprueba, en tiempo de compilación, que

@@ -116,6 +116,10 @@ func TestAsignarEscolta(t *testing.T) {
 	if out.ViajeId != viajeID {
 		t.Errorf("viaje_id en respuesta: got %v, want %v", out.ViajeId, viajeID)
 	}
+	// La respuesta afirma el estado tras la reserva (tracer.20): ASIGNADO.
+	if out.Estado != operclient.ASIGNADO {
+		t.Errorf("estado en respuesta: got %q, want ASIGNADO", out.Estado)
+	}
 
 	// El viaje quedó ASIGNADO.
 	if e := estadoDe(t, ctx, viajeID); e != "ASIGNADO" {
@@ -207,6 +211,10 @@ func TestReasignarEscolta(t *testing.T) {
 	}
 	if len(out.Unidades) != 1 || out.Unidades[0].UnidadId != u3 {
 		t.Errorf("escolta resultante: got %+v, want [u3]", out.Unidades)
+	}
+	// La respuesta afirma el estado actual, que la reasignación no cambia (tracer.20).
+	if out.Estado != operclient.ASIGNADO {
+		t.Errorf("estado en respuesta: got %q, want ASIGNADO", out.Estado)
 	}
 
 	// El estado del viaje NO cambia: sigue ASIGNADO.

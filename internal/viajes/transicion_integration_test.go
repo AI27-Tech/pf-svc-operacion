@@ -39,7 +39,7 @@ func TestTransicionar(t *testing.T) {
 
 	// --- Transición válida con guarda satisfecha: SOLICITADO -> APROBADO ---
 	v := crearSolicitado(t, ctx, svc, true)
-	out, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO})
+	out, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("transición SOLICITADO->APROBADO: %v", err)
 	}
@@ -51,23 +51,23 @@ func TestTransicionar(t *testing.T) {
 	}
 
 	// --- Arista inexistente: APROBADO -> EN_DESTINO (no hay arista) -> error ---
-	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO}); err == nil {
+	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO}, "jefe_operativo"); err == nil {
 		t.Error("transición por arista inexistente debió fallar")
 	}
 
 	// --- Guarda diferida: APROBADO -> ASIGNADO (escolta, Slice 3) -> error ---
-	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ASIGNADO}); err == nil {
+	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ASIGNADO}, "jefe_operativo"); err == nil {
 		t.Error("transición diferida APROBADO->ASIGNADO debió rechazarse")
 	}
 
 	// --- Guarda de motivo: SOLICITADO -> RECHAZADO_POR_AI27 sin causa -> error ---
 	vr := crearSolicitado(t, ctx, svc, true)
-	if _, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27}); err == nil {
+	if _, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27}, "jefe_operativo"); err == nil {
 		t.Error("rechazo sin causa debió fallar")
 	}
 	// con causa -> ok
 	causa := "documentación incompleta"
-	outR, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27, Causa: &causa})
+	outR, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27, Causa: &causa}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("rechazo con causa: %v", err)
 	}
@@ -77,12 +77,12 @@ func TestTransicionar(t *testing.T) {
 
 	// --- Guarda de fecha: SOLICITADO sin fecha -> APROBADO -> error ---
 	vsf := crearSolicitado(t, ctx, svc, false)
-	if _, err := svc.Transicionar(ctx, vsf.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err == nil {
+	if _, err := svc.Transicionar(ctx, vsf.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
 		t.Error("aprobar sin fecha_hora_servicio debió fallar")
 	}
 
 	// --- Transición a un viaje inexistente -> NoEncontrado ---
-	if _, err := svc.Transicionar(ctx, uuid.New(), operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err == nil {
+	if _, err := svc.Transicionar(ctx, uuid.New(), operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
 		t.Error("transición de viaje inexistente debió fallar")
 	}
 }
