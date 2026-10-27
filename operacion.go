@@ -34,9 +34,12 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/bitacora"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/descargas"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -96,6 +99,11 @@ type Module struct {
 	deps       Deps
 	viajes     *viajes.Servicio
 	asignacion *asignacion.Servicio
+	bitacora   *bitacora.Servicio
+	descargas  *descargas.Servicio
+	// auditoriaConsulta lee la bitácora probatoria para la composición del
+	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
+	auditoriaConsulta *auditoria.ServicioConsulta
 	// relay drena viajes.outbox al bus. nil si Deps.BusPublisher no se inyectó
 	// (arranque standalone sin bus); en ese caso Workers() no lo arranca.
 	relay worker.Worker
@@ -110,7 +118,10 @@ type Module struct {
 	// consumidorCatalogos es el worker durable de catalogo.actualizado que
 	// invalida la caché de aptitud (E5-T5). nil sin Subscriber.
 	consumidorCatalogos worker.Worker
-	// Aquí vivirán los demás casos de uso (bitacora) al implementarse.
+	// consumidorEmergencia es el worker durable de emergencia.nota_agregada que
+	// proyecta cada nota de emergencia al histórico/bitácora del viaje (E7,
+	// tracer.17, DEC-100). nil sin Subscriber.
+	consumidorEmergencia worker.Worker
 }
 
 // umbralFrescura es la ventana tras la cual el canal de revocación se considera
@@ -128,6 +139,14 @@ func New(p Pools, d Deps) (*Module, error) {
 		deps:       d,
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
+		bitacora:   bitacora.NewServicio(p.Bitacora),
+		// registrarDescargaViaje (AI27-80): lee el viaje con op_viajes y escribe el
+		// rastro de auditoría con el rol dueño op_auditoria vía el interceptor. Dos
+		// pools, uno por rol (I1); sin GRANT cruzado a op_viajes (ADR 31/33).
+		descargas: descargas.NewServicio(p.Viajes, p.Auditoria),
+		// Consulta de la auditoría probatoria para componer la descarga (E6-T3).
+		// Lee con op_auditoria (SELECT sobre registro_auditoria); no escribe.
+		auditoriaConsulta: auditoria.NewServicioConsulta(p.Auditoria),
 	}
 	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
@@ -187,6 +206,27 @@ func New(p Pools, d Deps) (*Module, error) {
 		}
 		m.consumidorCatalogos = w
 	}
+	// Consumidor durable de emergencia.nota_agregada (E7, tracer.17, DEC-100):
+	// proyecta cada nota de emergencia al histórico/bitácora del viaje. Primer
+	// consumidor durable RESTRINGIDO de operacion (el evento viaja por el tema
+	// restringido). La idempotencia es durable (RegistrarDesdeEvento por
+	// evento_id), no en memoria. Solo con Subscriber.
+	if d.Subscriber != nil {
+		cons := consumidores.NuevoConsumidorEmergenciaNota(m.bitacora)
+		handler := func(ctx context.Context, s bus.Sobre) error {
+			return cons.Procesar(ctx, s)
+		}
+		w, err := d.Subscriber.Subscribe(
+			"operacion-emergencia",
+			bus.SensibilidadRestringida,
+			[]string{consumidores.TipoEmergenciaNotaAgregada},
+			handler,
+		)
+		if err != nil {
+			return nil, err
+		}
+		m.consumidorEmergencia = w
+	}
 	return m, nil
 }
 
@@ -220,6 +260,20 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
+	mux.Handle("POST /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleRegistrarBitacora)))
+	mux.Handle("GET /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleListarBitacora)))
+	// Condiciones ortogonales (E1-T6): incidencias y estadías. Abrir/cerrar
+	// NINGUNA cambia viaje.estado (§C.2). Los sirve el módulo viajes (dueño de
+	// condicion_viaje y de la nueva tabla estadia, mismo rol op_viajes).
+	mux.Handle("POST /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleAbrirIncidencia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/incidencias/{iid}", protegido(http.HandlerFunc(m.handleResolverIncidencia)))
+	mux.Handle("POST /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleAbrirEstadia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/estadias/{eid}", protegido(http.HandlerFunc(m.handleCerrarEstadia)))
+	mux.Handle("GET /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleListarEstadias)))
+	// Descarga del expediente (AI27-80, E1-T7): bff compone la descarga e invoca a
+	// operacion para DEJAR el rastro de auditoría (el rastro lo escribe operacion
+	// en su transacción, no el bff). Sin cuerpo; responde el Viaje descargado.
+	mux.Handle("POST /api/v1/viajes/{id}/descargas", protegido(http.HandlerFunc(m.handleRegistrarDescarga)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -236,7 +290,14 @@ func (m *Module) handleTransicionar(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
 		return
 	}
-	v, err := m.viajes.Transicionar(r.Context(), id, body)
+	// El rol del actor viaja en los claims (DEC-053): lo exige la guarda del
+	// cierre (anticipado solo por un operador interno autorizado, DEC-020 #6 /
+	// DEC-060 #1). Las demás aristas lo ignoran.
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	v, err := m.viajes.Transicionar(r.Context(), id, body, rol)
 	if err != nil {
 		escribirError(w, err)
 		return
@@ -318,6 +379,206 @@ func (m *Module) handleFijarEta(w http.ResponseWriter, r *http.Request) {
 	escribirJSON(w, http.StatusOK, v)
 }
 
+// handleRegistrarBitacora atiende POST /api/v1/viajes/{id}/bitacora: lee el texto
+// de la entrada (EntradaBitacoraEntrada) y delega en el caso de uso de bitácora,
+// que inserta la entrada (append-only) y audita en la misma tx. 201 Created.
+//
+// NO existe handler de edición ni de borrado de entradas: la bitácora es
+// append-only (E1-T5), y una corrección es una entrada nueva.
+func (m *Module) handleRegistrarBitacora(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.EntradaBitacoraEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	e, err := m.bitacora.RegistrarEntrada(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, e)
+}
+
+// handleListarBitacora atiende GET /api/v1/viajes/{id}/bitacora: lee el cursor
+// opcional de la query y delega en el caso de uso, que devuelve las entradas en
+// orden cronológico (las más antiguas primero).
+func (m *Module) handleListarBitacora(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var params operclient.ListarBitacoraParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.bitacora.ListarBitacora(r.Context(), id, params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// handleAbrirIncidencia atiende POST /api/v1/viajes/{id}/incidencias: lee el tipo
+// interno y la descripción (IncidenciaEntrada) y delega en viajes, que abre la
+// condición ortogonal INCIDENCIA sin tocar viaje.estado. El rol del actor viaja
+// en los claims (operador/supervisor/administrador; reacción NO, DEC-028). 201.
+func (m *Module) handleAbrirIncidencia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.IncidenciaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	inc, err := m.viajes.AbrirIncidencia(r.Context(), id, body, rol)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, inc)
+}
+
+// handleResolverIncidencia atiende PATCH /api/v1/viajes/{id}/incidencias/{iid}:
+// cierra la condición INCIDENCIA (sin tocar viaje.estado) y publica
+// viaje.condicion_cerrada. SOLO supervisor o administrador (un operador que abrió
+// no puede resolver). Lee id/iid con r.PathValue.
+func (m *Module) handleResolverIncidencia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	iid, err := uuid.Parse(r.PathValue("iid"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de incidencia inválido"))
+		return
+	}
+	var body operclient.ResolucionIncidenciaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var rol string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		rol = claims.Rol
+	}
+	inc, err := m.viajes.ResolverIncidencia(r.Context(), id, iid, body, rol)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, inc)
+}
+
+// handleAbrirEstadia atiende POST /api/v1/viajes/{id}/estadias: lee el motivo y el
+// eje de autorización (EstadiaEntrada) y delega en viajes, que abre la estadía
+// fijando inicio = ahora, sin tocar viaje.estado. 201 Created.
+func (m *Module) handleAbrirEstadia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.EstadiaEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	est, err := m.viajes.AbrirEstadia(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, est)
+}
+
+// handleCerrarEstadia atiende PATCH /api/v1/viajes/{id}/estadias/{eid}: cierra la
+// estadía abierta fijando cierre = ahora (cuerpo vacío, CierreEstadiaEntrada), sin
+// tocar viaje.estado. Lee id/eid con r.PathValue.
+func (m *Module) handleCerrarEstadia(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	eid, err := uuid.Parse(r.PathValue("eid"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de estadía inválido"))
+		return
+	}
+	// El cuerpo es vacío por contrato; no se decodifica nada de él.
+	est, err := m.viajes.CerrarEstadia(r.Context(), id, eid)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, est)
+}
+
+// handleListarEstadias atiende GET /api/v1/viajes/{id}/estadias: lee el cursor
+// opcional de la query y delega en viajes, que devuelve las estadías en orden de
+// ocurrencia. La duración NO viene en la respuesta: se deriva de inicio/cierre.
+func (m *Module) handleListarEstadias(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var params operclient.ListarEstadiasParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.viajes.ListarEstadias(r.Context(), id, params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// handleRegistrarDescarga atiende POST /api/v1/viajes/{id}/descargas
+// (registrarDescargaViaje, AI27-80): deja el rastro de auditoría de la descarga
+// del expediente y responde el Viaje descargado. No tiene cuerpo. El actor (quién
+// descargó) sale de los claims del token; el viaje, de {id}. El registro se
+// escribe con el rol dueño op_auditoria vía el interceptor, append-only.
+func (m *Module) handleRegistrarDescarga(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	v, err := m.descargas.Registrar(r.Context(), id, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, v)
+}
+
 // escribirJSON serializa v como respuesta JSON con el status dado.
 func escribirJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -361,6 +622,9 @@ func (m *Module) Workers() []worker.Worker {
 	if m.consumidorCatalogos != nil {
 		ws = append(ws, m.consumidorCatalogos)
 	}
+	if m.consumidorEmergencia != nil {
+		ws = append(ws, m.consumidorEmergencia)
+	}
 	return ws
 }
 
@@ -390,6 +654,12 @@ type ConsultasAPI interface {
 	CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error)
 	ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error)
 	ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error)
+	// ListarBitacora, ConsultarAuditoria y RegistrarDescargaViaje sostienen la
+	// composición del expediente de descarga de UN viaje (E6-T3, ADR 27): bff
+	// agota las páginas de bitácora y auditoría y deja el rastro de la descarga.
+	ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error)
+	ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error)
+	RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
 }
 
 type consultas struct {
@@ -412,4 +682,26 @@ func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarVi
 
 func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
 	return c.m.viajes.Obtener(ctx, id)
+}
+
+// ListarBitacora reenvía al caso de uso de bitácora (mismo que el handler HTTP,
+// I3). El cursor ya viene armado en params.
+func (c *consultas) ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error) {
+	return c.m.bitacora.ListarBitacora(ctx, id, params)
+}
+
+// ConsultarAuditoria reenvía al servicio de consulta de auditoría (op_auditoria).
+func (c *consultas) ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error) {
+	return c.m.auditoriaConsulta.Consultar(ctx, id, params)
+}
+
+// RegistrarDescargaViaje deja el rastro de la descarga y devuelve el Viaje. El
+// actor sale de los claims del ctx (igual que el handler HTTP, I3); nil-safe:
+// sin claims el actor queda vacío (autor_id NULL), no es error.
+func (c *consultas) RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error) {
+	var actor string
+	if claims := auth.ClaimsFromContext(ctx); claims != nil {
+		actor = claims.Subject
+	}
+	return c.m.descargas.Registrar(ctx, id, actor)
 }

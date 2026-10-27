@@ -1,5 +1,154 @@
 # CHANGELOG
 
+## 2026-10-27 — E6-T3: bitácora, auditoría y descarga en la superficie en proceso (ConsultasAPI)
+
+**Resumen:** `ConsultasAPI` (la superficie síncrona que `bff` consume en proceso vía `core`) gana los tres métodos que su puerto `OperacionPort` ya exigía pero que solo existían como handlers HTTP: `ListarBitacora`, `ConsultarAuditoria` y `RegistrarDescargaViaje`. Sin ellos, `core` no podía cablear el adaptador en proceso `bff→operacion` contra un `bff` reciente (su puerto tiene seis métodos; la fachada exponía tres). Cierra esa brecha de integración de E6-T3.
+
+**Para quién:** para `pf-svc-core`, que compone la descarga del expediente de UN viaje (E6-T3, ADR 27) en proceso: `bff` agota las páginas de bitácora y auditoría de `operacion` y le pide dejar el rastro de la descarga. El adaptador HTTP de esas rutas ya existía; faltaba la paridad en proceso (I3).
+
+**Cambios:**
+- `internal/auditoria/consulta.go` (nuevo): `ServicioConsulta.Consultar(ctx, viajeID, params)` — lee `auditoria.registro_auditoria` con el rol `op_auditoria` (que ya tiene `SELECT`), paginado por cursor keyset sobre `(ocurrido_en, id)`, orden cronológico. Mapea `modulo`→`entidad`, `viaje_id`→`entidad_id`, `actor_id`→`actor`, y extrae `de`/`a` del `detalle` JSONB cuando el registro fue una transición de estado (opcionales). El paquete `auditoria` tenía solo el interceptor de escritura; ahora tiene también la lectura.
+- `operacion.go`: campo `auditoriaConsulta` en `Module` (construido en `New` sobre `p.Auditoria`); los tres métodos nuevos en `ConsultasAPI` + impl. `ListarBitacora` y `RegistrarDescargaViaje` delegan en los MISMOS casos de uso que los handlers HTTP (`m.bitacora`, `m.descargas`), con el actor de la descarga sacado de los claims del ctx (I3, paridad con el handler). `ConsultarAuditoria` delega en el servicio nuevo.
+- `consultas_test.go`: el interface local `puertoOperacionBFF` (que fija la forma contra el puerto del `bff` en compilación) gana los tres métodos.
+- `internal/auditoria/consulta_integration_test.go` (nuevo): orden+mapeo (incluido `de`/`a` del detalle), paginación por cursor (51→50+1), página vacía. Verde contra Postgres real.
+
+**Verificación:** `go build/vet ./...`, `go test ./...` con DB (serializado por advisory lock), `arch-test` (sin aristas nuevas: `ConsultarAuditoria` lee del pool propio `op_auditoria`, no cruza a otro servicio) y `go build ./cmd/api` (I5). `SELECT` sobre `registro_auditoria` ya lo tenía `op_auditoria` (0002_grants): no toca migraciones ni grants.
+
+## 2026-10-27 — tracer.20: `estado` en la respuesta de asignación/reasignación (E8-T11)
+
+**Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.17` a `v0.1.0-tracer.20` y se rellena el campo `estado`, nuevo requerido en `Asignacion`, en las dos respuestas que lo construyen. El contrato de tracer.20 añade `Asignacion.estado` (referencia a `EstadoViaje`) para que el consumidor afirme el estado en el dato en vez de inferirlo del éxito de la operación (DEC-101). Aditivo: la respuesta de `asignarRecursos` ya era `200`.
+
+**Para quién:** para `bff` y el panel interno (E8-T11), que al poblar el selector y asignar un viaje necesitan afirmar `ASIGNADO` sin inferirlo. Sin este relleno el pin compila pero emite `"estado":""` en runtime, violando el contrato.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` de `v0.1.0-tracer.17` a `v0.1.0-tracer.20`. Sin renombrados de enum que afecten el código (se verificó con `go build`/`go vet`).
+- `internal/asignacion/servicio.go`: la respuesta de `Asignar` fija `Estado: ASIGNADO` (la tx acaba de transicionar APROBADO→ASIGNADO en la misma transacción); la de `Reasignar` fija el estado actual ya cargado (`EstadoViaje(estado)`), porque la reasignación no transiciona.
+- `internal/asignacion/servicio_integration_test.go`: `TestAsignarEscolta` y `TestReasignarEscolta` afirman ahora `out.Estado == ASIGNADO`.
+
+
+
+**Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.10` a `v0.1.0-tracer.16` y se implementa lo que `operacion` debe exponer para cerrar las dos brechas del sprint. **Parte A (AI27-59):** la lectura del viaje expone ahora las incidencias abiertas con su `tipo_interno`, para que `bff` componga la categoría curada del cliente (DEC-006). **Parte B (AI27-80):** el comando `registrarDescargaViaje` deja el rastro de auditoría de la descarga del expediente, escrito por `operacion` con el rol dueño `op_auditoria` vía el interceptor, append-only. No se tocó `pf-pkg-contracts`.
+
+**Para quién:** para `bff`, que quedaba bloqueado en ambas pantallas hasta el contrato: AI27-59 (vista curada de incidencia del cliente, que mapea `tipo_interno` → categoría) y AI27-80 (descarga del expediente, cuyo rastro de auditoría lo escribe `operacion` en su transacción, no `bff`).
+
+**Pin (PASO 0):**
+- `go.mod`/`go.sum`: `api-client-go` de `v0.1.0-tracer.10` a `v0.1.0-tracer.16`. El salto renombró los enums de `Incidencia.Estado` (`EnAtencion`/`Resuelta` → `IncidenciaEstadoEnAtencion`/`IncidenciaEstadoResuelta`), que `internal/viajes/incidencia.go` y su test ya usaban; se actualizaron las referencias. El contrato agregó además `ViajeDetalle.incidencias_activas []IncidenciaActiva` (opcional, aditivo) y el `operationId` `registrarDescargaViaje`.
+
+**Parte A — incidencias con `tipo_interno` en la lectura del viaje (AI27-59):**
+- `internal/viajes/servicio.go`: nuevo helper `incidenciasAbiertas(ctx, tx, viajeID)` que lee `id, tipo_interno, abierta_en` de `viajes.condicion_viaje WHERE tipo='INCIDENCIA' AND cerrada_en IS NULL` y devuelve `[]operclient.IncidenciaActiva` con `estado = en_atencion` (una incidencia en la lista está abierta por definición), nunca `nil` (lista vacía como forma estable). `Obtener` rellena el nuevo `ViajeDetalle.IncidenciasActivas` sin tocar `CondicionesActivas` (dimensión aditiva: la misma incidencia abierta aparece en ambas). El dato ya estaba en la base (AI27-14, `op_viajes` ya tiene SELECT sobre esa tabla): no hay captura nueva ni cambio de permisos. Fluye a `bff` por `ObtenerViaje` (`ConsultasAPI`), sin endpoint nuevo.
+- `internal/viajes/incidencia_integration_test.go`: nuevo `TestIncidenciasActivasExponeTipoInterno` (sin incidencias → lista vacía; tras abrir → `tipo_interno`/`id`/`estado` correctos y coexistencia con `CondicionesActivas`; tras resolver → desaparece de la lista).
+
+**Parte B — `registrarDescargaViaje` deja el rastro de auditoría (AI27-80):**
+- `internal/descargas/servicio.go` (nuevo): `Servicio.Registrar(ctx, viajeID, actorID)` con DOS pools, uno por rol (I1): lee el viaje con `op_viajes` (SELECT sobre su propio esquema; da el `404` y arma el `Viaje` de la respuesta) y escribe EXACTAMENTE un registro en `auditoria.registro_auditoria` con el rol dueño `op_auditoria` vía `auditoria.Interceptar` DENTRO de una transacción (acción `descarga_expediente`, actor = `claims.Subject`, viaje = `{id}`, momento = `now()`). Un viaje inexistente da `404` y NO escribe registro. **No se otorga GRANT de escritura a `op_viajes` ni se abre una segunda excepción de GRANT cruzado** (la única es la de `op_asignacion`, ADR 31/33): el camino es el rol dueño `op_auditoria`, que tiene `INSERT` por diseño; sin ADR. Append-only: el esquema no otorga `UPDATE`/`DELETE` a nadie.
+- `operacion.go`: se construye `descargas.NewServicio(p.Viajes, p.Auditoria)` en `New` (el pool `op_auditoria`, antes sin uso en ningún caso de uso, ahora alimenta este comando); se monta `POST /api/v1/viajes/{id}/descargas` bajo `protegido` y se agrega `handleRegistrarDescarga`, que lee `{id}` con `r.PathValue` y el actor de `auth.ClaimsFromContext(ctx).Subject`, y responde `200` con el `Viaje`.
+- `internal/descargas/servicio_integration_test.go` (nuevo): una llamada escribe exactamente un registro con actor/viaje/acción/momento y devuelve el `Viaje`; viaje inexistente → `404` sin registro; append-only verificado al nivel del GRANT (`UPDATE`/`DELETE` con `op_auditoria` fallan y el registro queda intacto).
+
+**No se tocó el contrato** (`pf-pkg-contracts`). Las formas `IncidenciaActiva`, `ViajeDetalle.incidencias_activas` y `registrarDescargaViaje` ya vienen generadas en `tracer.16`.
+
+**Verificado:** `go build ./...`, `go vet ./...` y `go test ./...` en verde (todos los paquetes pasan; los tests de integración se saltan sin `OPERACION_TEST_DB`).
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`
+- `internal/viajes/servicio.go`
+- `internal/viajes/incidencia.go`
+- `internal/viajes/incidencia_integration_test.go`
+- `internal/descargas/servicio.go` (nuevo)
+- `internal/descargas/servicio_integration_test.go` (nuevo)
+- `operacion.go`
+
+## 2026:10:21 — E1-T6 (AI27-14): incidencias y estadías como condiciones ortogonales
+
+**Resumen:** se implementan las dos CONDICIONES ORTOGONALES al progreso del viaje (§C.2, P15): incidencias y estadías. Abrir o cerrar cualquiera de ellas NO cambia `viaje.estado` —son dimensiones ortogonales, no estados—. Un viaje puede tener a la vez una incidencia abierta y una estadía abierta. La incidencia reutiliza `viajes.condicion_viaje` (que AI27-16 ya lee para el cierre anticipado); la estadía estrena su propia tabla `viajes.estadia`. Ambos casos de uso viven en el módulo `viajes` (rol `op_viajes`), que ya es dueño de `condicion_viaje` y del outbox único de `viaje.*`.
+
+**Para quién:** para `bff` y los paneles internos que abren/resuelven incidencias y registran/cierran estadías; para `mensajeria`/`reportes` (consumidores de `viaje.condicion_abierta`/`viaje.condicion_cerrada`); y para AI27-16, cuyo cierre anticipado lee la condición `INCIDENCIA` que este ticket abre y cierra.
+
+**Incidencias:**
+- `internal/viajes/incidencia.go` (nuevo): `AbrirIncidencia` inserta la condición `INCIDENCIA` en `viajes.condicion_viaje` (`cerrada_en` NULL) con su detalle (`tipo_interno`, `descripcion`) y publica `viaje.condicion_abierta` por el outbox de `viajes`, todo en UNA transacción (P17). NO cambia `viaje.estado`. Pueden abrir `operador`, `supervisor`, `administrador`; `reaccion` NO (DEC-028) ni el cliente. Dos `INCIDENCIA` abiertas del mismo viaje las impide el índice único parcial `una_condicion_abierta_por_tipo`; la violación 23505 se traduce a **Conflicto (409)**, nunca a un 500. `ResolverIncidencia` cierra la condición (`cerrada_en` + `resuelta_en` derivado) y publica `viaje.condicion_cerrada`, en su tx; SOLO `supervisor` o `administrador` (un operador que abrió no puede resolver: rechazo por rol). El `estado` del contrato (`en_atencion`/`resuelta`) se DERIVA de `cerrada_en`, no se persiste.
+- `migrations/viajes/0004_incidencia_estadia.sql` (nuevo): `ALTER TABLE viajes.condicion_viaje ADD COLUMN tipo_interno, descripcion`. Los GRANT de `condicion_viaje` (`SELECT, INSERT, UPDATE` para `op_viajes`) ya estaban en `0002_grants`; agregar columnas no los cambia.
+
+**Estadías (DEC-038):**
+- `internal/viajes/estadia.go` (nuevo): `AbrirEstadia` fija `inicio = ahora` y deja `cierre` NULL, sin tocar `viaje.estado`; valida `motivo` y `eje_autorizacion` contra sus catálogos cerrados. `CerrarEstadia` (cuerpo vacío) fija `cierre = ahora`. `ListarEstadias` devuelve las estadías en orden de ocurrencia con cursor keyset sobre `(inicio, id)`. `CerrarEstadiaActivaPorReinicio` cierra la estadía activa (efecto del "reinicio de viaje", DEC-013) SIN ser transición de estado; idempotente.
+- Tabla `viajes.estadia (id, viaje_id, motivo, eje_autorizacion, inicio, cierre)` en `0004`, con `GRANT SELECT, INSERT, UPDATE TO op_viajes` (declarado explícito porque `0002_grants` revocó los defaults). **PROHIBIDO y cumplido:** NO hay columna/duración persistida, ni campo/bandera `prolongada`, ni umbral o parámetro. La DURACIÓN se DERIVA de `(inicio, cierre)` en la lectura.
+
+**Handlers y rutas (`operacion.go`):** `POST /incidencias`, `PATCH /incidencias/{iid}`, `POST /estadias`, `PATCH /estadias/{eid}`, `GET /estadias`, todas bajo el middleware `protegido`. Leen `id/iid/eid` con `r.PathValue` y el rol/actor de los claims. Los casos de uso son métodos del `viajes.Servicio` ya construido en `New` con el pool `op_viajes`: no se añade un servicio nuevo (la condición, su detalle y el outbox viven todos en el esquema `viajes`).
+
+**Tests de integración:**
+- `internal/viajes/incidencia_integration_test.go` (nuevo): abrir no cambia `viaje.estado` (se lee antes/después) y publica `viaje.condicion_abierta`; `reaccion` no puede abrir (DEC-028); operador no puede resolver (rechazo por rol) y supervisor sí (cierra + `viaje.condicion_cerrada`); dos incidencias abiertas → Conflicto por el índice; coexistencia incidencia + estadía; `tipo_interno` obligatorio.
+- `internal/viajes/estadia_integration_test.go` (nuevo): abrir no cambia estado; duración derivable de `(inicio, cierre)` sin capturarla; **NO existe** ninguna columna `prolongada`/`duracion`/umbral (verificado contra `information_schema.columns`); el reinicio cierra la estadía activa (idempotente); motivo/eje inválidos rechazados.
+- `internal/viajes/servicio_integration_test.go`: el `TRUNCATE` de `prepara` ahora incluye `viajes.estadia`.
+
+**No se tocó el contrato** (`pf-pkg-contracts`), ni el pin (sigue `v0.1.0-tracer.10`). Las formas `Incidencia`/`IncidenciaEntrada`/`ResolucionIncidenciaEntrada`/`Estadia`/`EstadiaEntrada`/`CierreEstadiaEntrada`/`PaginaEstadias` ya estaban generadas.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+**Archivos modificados:**
+- `migrations/viajes/0004_incidencia_estadia.sql` (nuevo)
+- `internal/viajes/incidencia.go` (nuevo)
+- `internal/viajes/estadia.go` (nuevo)
+- `internal/viajes/incidencia_integration_test.go` (nuevo)
+- `internal/viajes/estadia_integration_test.go` (nuevo)
+- `internal/viajes/servicio_integration_test.go`
+- `operacion.go`
+
+## 2026:10:20 — E1-T8 (AI27-16): cierre del servicio
+
+**Resumen:** se implementa el cierre del viaje: se reemplazan las tres guardas diferidas de cierre (`EN_DESTINO`/`EN_DESCARGA`/`EN_TRANSITO → CERRADO`) por lógica real. El cierre exige un motivo del catálogo `normal | por_incidencia | bitacora`. El cierre normal (tras la última parada) es válido desde `EN_DESTINO`/`EN_DESCARGA`; el cierre anticipado (desde `EN_TRANSITO`) solo con motivo `por_incidencia`, solo por un rol operador interno autorizado (`jefe_operativo`/`administrador`, DEC-060 #1) y solo con una condición `INCIDENCIA` abierta (DEC-020 #6). Al cerrar se publica `viaje.cerrado` con el motivo en el payload, en la misma tx (P17), para que `mensajeria` decida la ventana de la conversación (3 días / 6 meses, DEC-030/041) sin volver a llamar a `operacion`.
+
+**Para quién:** para `mensajeria` y `reportes` (consumidores de `viaje.cerrado`), para el panel del jefe operativo (E6-HU-033) y para `bff`, que exponen el cierre. Antes la arista a `CERRADO` devolvía 409 "no soportado todavía".
+
+**Cambios:**
+- `internal/viajes/transicion.go`: `Transicionar` ahora recibe el `rol` del actor (lo exige la guarda del cierre). Se quitan las tres guardas `guardaDiferida` de cierre del mapa `guardas`; el cierre se valida en `validarCierre` (dentro de la misma tx, porque necesita leer la base y el rol, lo que no cabe en la firma de una `guarda` pura). Se añade `hayIncidenciaAbierta` (lee `viajes.condicion_viaje`, `tipo='INCIDENCIA' AND cerrada_en IS NULL`). Al transicionar a `CERRADO` se publica `viaje.cerrado` (motivo en payload) además del `viaje.estado_cambiado` genérico.
+- `operacion.go`: `handleTransicionar` lee `claims.Rol` del contexto y lo pasa a `Transicionar` (mismo patrón que `handleAsignar` con `claims.Subject`).
+- `internal/viajes/transicion_integration_test.go`: se actualizan las llamadas existentes a la nueva firma de `Transicionar`.
+- `internal/viajes/cierre_integration_test.go` (nuevo): cierre normal tras la última parada (publica `viaje.cerrado` con motivo); anticipado por incidencia por operador OK; mismo intento por un cliente rechazado; anticipado sin incidencia rechazado; cerrar sin motivo rechazado; y verificación de que `viaje.cerrado` lleva el motivo en el payload (`payload->>'motivo_cierre'`), legible por el consumidor sin llamar a `operacion`.
+
+**Brecha de contrato reportada (no resuelta aquí):** `TransicionEntrada` no tiene un campo `motivo_cierre` con el catálogo `normal|por_incidencia|bitacora`; solo tiene `causa` (texto libre). Por instrucción del ticket NO se tocó el contrato. Como puente, el motivo de cierre se lee de `causa` cuando `a_estado = CERRADO` y se valida en el servicio. Detalle y propuesta en `.scratch/e1-t8-cierre-viaje/brecha-motivo-de-cierre.md`.
+
+**Aproximación documentada (pendiente de Producto):** "última parada" se aproxima por el estado de origen (`EN_DESTINO`/`EN_DESCARGA`). No existe un puntero de parada actual en el esquema y la condición exacta de "listo para cerrar" no está fijada en las fuentes (E6-HU-033); no se verifica que sea literalmente la última parada de la ruta.
+
+**Coordinación con AI27-14 (E1-T6):** ambos usan `viajes.condicion_viaje` para la incidencia abierta; el cierre anticipado la lee como precondición, E1-T6 la abre y la cierra.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+
+**Archivos modificados:**
+- `internal/viajes/transicion.go`
+- `operacion.go`
+- `internal/viajes/transicion_integration_test.go`
+- `internal/viajes/cierre_integration_test.go` (nuevo)
+
+## 2026:10:20
+
+**Resumen:** E1-T5 (AI27-13): caso de uso de bitácora del viaje en `operacion`. Registrar una entrada y listar las entradas de un viaje en orden cronológico `(viaje_id, creado_en)`. La bitácora es append-only: no hay edición ni borrado de entradas; una corrección es una entrada nueva. Consume la superficie de bitácora ya contratada en `pf-pkg-contracts` (disponible desde tracer.10).
+
+**Para quién:** para `bff` y los paneles que registran y leen la bitácora de un viaje. Antes `internal/bitacora` era solo un stub (`doc.go`); ahora expone el caso de uso y sus rutas HTTP.
+
+**Cambios:**
+- `internal/bitacora/servicio.go` (nuevo): `Servicio` con `RegistrarEntrada` y `ListarBitacora`, mismo patrón que `viajes`/`asignacion` (`Servicio{tx BeginTx}`, `NewServicio`, `tx.Begin → defer Rollback → validar → exec → Commit`). `RegistrarEntrada` hace un INSERT append-only y exige texto no vacío. `ListarBitacora` lee en orden cronológico (más antiguas primero) con paginación por cursor keyset. El id público del contrato (UUID) se deriva como UUIDv5 determinista del correlativo interno (`BIGSERIAL`): estable entre registrar y listar y opaco, sin tocar el contrato ni agregar columnas.
+- `internal/bitacora/cursor.go` (nuevo): cursor opaco base64 sobre `(creado_en, correlativo)`.
+- `operacion.go`: handlers `handleRegistrarBitacora` y `handleListarBitacora`, rutas `POST` y `GET /api/v1/viajes/{id}/bitacora` protegidas, y construcción del servicio en `New` con el pool `p.Bitacora`.
+- `internal/bitacora/servicio_integration_test.go`, `bitacora_rutas_test.go` (tests): registrar y listar en orden con id estable y filtro por viaje; texto obligatorio; append-only verificado al nivel del GRANT (UPDATE/DELETE con `op_bitacora` fallan); la ruta solo acepta POST y GET (DELETE → 405, `Allow` sin PUT/PATCH/DELETE).
+
+**Decisión reportada (no resuelta por código):** la bitácora NO audita en V1. El interceptor de auditoría (P3) escribe en el esquema `auditoria`, pero la única excepción de GRANT cruzado del sistema es `op_asignacion` (operacion.md §(e), ADR 18 §4); dar a `op_bitacora` acceso a `auditoria` sería una segunda excepción prohibida sin ADR. Queda consistente con `viajes`, que tampoco audita hoy. Si P3 exige auditar la bitácora en su transacción, es una decisión de arquitectura que debe ampliar la excepción por ADR.
+
+**Verificado:** `go build ./...`, `go vet ./...`, `go test ./...` en verde.
+
+**Archivos modificados:**
+- `operacion.go`
+- `internal/bitacora/servicio.go` (nuevo)
+- `internal/bitacora/cursor.go` (nuevo)
+- `internal/bitacora/servicio_integration_test.go` (nuevo)
+- `bitacora_rutas_test.go` (nuevo)
+
+## 2026:10:19
+
+**Resumen:** Se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.4` a `v0.1.0-tracer.10`. El salto es 100% aditivo en los clientes generados que `operacion` consume (sin líneas eliminadas ni cambios de firma entre las dos olas), así que no toca ningún caso de uso, handler ni tipo existente. Pone al día el contrato que `operacion` resuelve, que iba siete olas atrás del vivo; deja el cliente con las superficies de bitácora/auditoría ya contratadas disponibles para cuando E1-T5/E6-T3 (otro dueño) las consuman. No implementa ninguna de esas operaciones: solo actualiza el pin.
+
+**Para quién:** para quien construya bitácora (E1-T5, AI27-13) y la descarga (E6-T3, AI27-80) sobre `operacion`: el cliente generado deja de estar atrás del contrato.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` a `v0.1.0-tracer.10`.
+
+**Verificado:** `go build`/`vet` en verde, `gofmt` limpio, `go test ./...` en verde (incl. integración contra Postgres local: asignación atómica y viajes), `arch-test@v0.1.1 OK`.
+
 ## 2026:10:15 (hora local)
 
 **Resumen:** E5-T5 (AI27-77), lado consumidor en `operacion`: una caché en proceso de aptitud detrás del puerto `AptitudRecursos`, invalidada por el evento `catalogo.actualizado` que publica `catalogos`. Es la mitad consumidora de E5-T5; el productor ya emitía el evento desde E5-T1..T4. Alcance acotado a `operacion` (único consumidor que nombran el proto `catalogo.proto` y `contracts/events/INVENTARIO.md`); `mensajeria`/`bff`/`reportes` quedan como tickets hermanos.
