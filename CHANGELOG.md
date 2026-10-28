@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-10-28 — docs: corregir prosa stale del doc de `internal/consumidores`
+
+**Resumen:** solo comentarios. El doc del paquete `internal/consumidores` decía "los dos consumidores durables V1 de operacion" y cerraba con "Scaffolding: sin consumidores cableados todavía", ambas afirmaciones falsas: hay **tres** consumidores cableados (`catalogo.actualizado`, `sesion.revocada` y `emergencia.nota_agregada`) y el de emergencia (E7, tracer.17, DEC-100) ya está integrado y verde. La prosa quedó atrás del código al cerrar E7.
+
+**Para quién:** para quien lea el paquete y para el inventario de E7: el doc ya no contradice el código.
+
+**Cambios:**
+- `internal/consumidores/doc.go`: lista los tres consumidores (antes dos), añade `emergencia.nota_agregada` → histórico del viaje, y distingue los dos regímenes de idempotencia (en memoria para catálogo/revocación; durable por `evento_id` para la nota de emergencia). Se retira la línea "sin consumidores cableados todavía".
+
+**Verificación:** `gofmt` limpio, `go vet ./...` y `go build ./...` sin cambios (solo comentarios). Sin cambio de comportamiento.
+
 ## 2026-10-27 — E6-T3: bitácora, auditoría y descarga en la superficie en proceso (ConsultasAPI)
 
 **Resumen:** `ConsultasAPI` (la superficie síncrona que `bff` consume en proceso vía `core`) gana los tres métodos que su puerto `OperacionPort` ya exigía pero que solo existían como handlers HTTP: `ListarBitacora`, `ConsultarAuditoria` y `RegistrarDescargaViaje`. Sin ellos, `core` no podía cablear el adaptador en proceso `bff→operacion` contra un `bff` reciente (su puerto tiene seis métodos; la fachada exponía tres). Cierra esa brecha de integración de E6-T3.
