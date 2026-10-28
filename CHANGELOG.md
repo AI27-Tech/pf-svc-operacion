@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-10-28 — tracer.21: subir el pin de contrato (ficha técnica E8-T12 / histórico E8-T13)
+
+**Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.20` a `v0.1.0-tracer.21`. tracer.21 es aditivo (ficha técnica y proyección del histórico al bff); no toca ninguna ruta, esquema ni enum que `operacion` use. Solo `go.mod`/`go.sum`; sin cambio de código ni de comportamiento.
+
+**Para quién:** alineación de versión de contrato con el resto del backend; sin efecto funcional en `operacion`.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` `v0.1.0-tracer.20` → `v0.1.0-tracer.21`.
+
+**Verificación:** `go build/vet ./...`, `go test ./...` (10 paquetes ok), `gofmt` limpio, `arch-test` (v0.1.1) PASS. Sin renombres de enum (§8 de git-workflow): el build quedó verde sin tocar constantes.
+
 ## 2026-10-28 — docs: corregir prosa stale del doc de `internal/consumidores`
 
 **Resumen:** solo comentarios. El doc del paquete `internal/consumidores` decía "los dos consumidores durables V1 de operacion" y cerraba con "Scaffolding: sin consumidores cableados todavía", ambas afirmaciones falsas: hay **tres** consumidores cableados (`catalogo.actualizado`, `sesion.revocada` y `emergencia.nota_agregada`) y el de emergencia (E7, tracer.17, DEC-100) ya está integrado y verde. La prosa quedó atrás del código al cerrar E7.
