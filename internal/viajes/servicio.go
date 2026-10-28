@@ -105,6 +105,25 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 		return nil, err
 	}
 
+	// viaje.mensajeria_habilitada en la MISMA tx (DEC-016 #1): la conversación del
+	// viaje se habilita al crearlo, sin importar el estado inicial, para que el
+	// cliente pueda escribir desde que existe la solicitud. mensajeria lo consume
+	// para crear la conversación idempotentemente (E3-T1); por eso lleva el
+	// cliente_id, que acota la conversación (DEC-045 #8). Forma del payload a mano:
+	// no hay struct generado para los eventos viaje.* (misma brecha de contrato).
+	if err := s.pub.Publish(ctx, tx, outbox.Event{
+		Tipo:       "viaje.mensajeria_habilitada",
+		Version:    1,
+		AgregadoID: id.String(), // clave de orden = viaje_id
+		Payload: map[string]any{
+			"viaje_id":   id.String(),
+			"cliente_id": in.ClienteId.String(),
+			"creado_en":  ahora,
+		},
+	}); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("operacion: commit crear viaje: %w", err)
 	}

@@ -92,6 +92,14 @@ func TestCrearObtenerListar(t *testing.T) {
 		t.Errorf("viaje.creado en outbox: got %d, want 1", n)
 	}
 
+	// --- viaje.mensajeria_habilitada también, en la misma tx (DEC-016 #1): la
+	// conversación se habilita al crear el viaje, sin importar el estado inicial
+	// (aquí APROBADO, creado por interno); mensajeria lo consume para crear la
+	// conversación (E3-T1). ---
+	if n := contarEventos(t, ctx, "viaje.mensajeria_habilitada", v.Id.String()); n != 1 {
+		t.Errorf("viaje.mensajeria_habilitada en outbox: got %d, want 1", n)
+	}
+
 	// --- Obtener devuelve el detalle con destinos en orden y sin condiciones ---
 	det, err := svc.Obtener(ctx, v.Id)
 	if err != nil {
