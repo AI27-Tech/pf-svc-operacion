@@ -15,6 +15,11 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// audienciaCliente es el valor de dominio de la Audiencia del actor cliente
+// (auth.AudienciaCliente, DEC-054). Se compara como string plano para no acoplar
+// este paquete de dominio al paquete auth: el handler traduce claims.Audiencia.
+const audienciaCliente = "Cliente"
+
 // Transicionar mueve un viaje a un estado nuevo. viajes es la ÚNICA autoridad de
 // transición (P14): valida la arista contra la máquina de estados generada
 // (estados.PuedeTransicionar), aplica la guarda que la arista tenga, y escribe
@@ -24,7 +29,12 @@ import (
 // rol es el rol del actor (claims.Rol), necesario para las guardas que verifican
 // facultad por rol (el cierre anticipado por incidencia solo lo hace un operador
 // interno autorizado, DEC-020 #6 / DEC-060 #1). El resto de las aristas lo ignora.
-func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in operclient.TransicionEntrada, rol string) (*operclient.Viaje, error) {
+//
+// audiencia y tenantID son la Audiencia de dominio y el tenant del actor
+// (claims.Audiencia, claims.TenantID). Habilitan la transición de cliente de
+// E9-T7 (DEC-111): un actor de audiencia Cliente solo puede cancelar o rechazar
+// SU PROPIO viaje. Para audiencia Interno no cambian el comportamiento previo.
+func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in operclient.TransicionEntrada, rol, audiencia, tenantID string) (*operclient.Viaje, error) {
 	destino := estados.EstadoViaje(string(in.AEstado))
 
 	tx, err := s.tx.Begin(ctx)
@@ -50,6 +60,34 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 	}
 	if err != nil {
 		return nil, fmt.Errorf("operacion: cargar viaje: %w", err)
+	}
+
+	// Facultades del cliente sobre SU viaje (E9-T7, DEC-111). Solo aplica a
+	// audiencia Cliente; un actor interno conserva el comportamiento previo.
+	if audiencia == audienciaCliente {
+		// (a) Aislamiento por tenant. tenant = cliente (DEC-112): un cliente solo
+		// toca su propio viaje. Un viaje ajeno devuelve 404, NO 403: un 403
+		// confirmaría que el viaje existe (fuga entre clientes). 404 no revela nada.
+		//
+		// shortcut (DEC-112): la igualdad tenant==cliente es regla de dominio
+		// ratificada, pero su garantía end-to-end depende de la semilla de tenants,
+		// del alta que iguala los UUID y del vínculo usuario↔cliente (DEC-045), aún
+		// pendientes. La comparación es correcta en lógica; su blindaje real llega
+		// cuando esas piezas existan.
+		if tenantID == "" || tenantID != clienteID.String() {
+			return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+		}
+		// (b) El cliente solo cancela o rechaza (DEC-111). Cualquier otra arista
+		// es facultad del operador: 401 (NewProhibido/403 no existe en la taxonomía
+		// de plataforma; NewNoAutorizado es el patrón ya usado para negar facultad).
+		if destino != estados.EstadoCancelado && destino != estados.EstadoRechazadoPorCliente {
+			return nil, platformerrors.NewNoAutorizado("operacion: un cliente solo puede cancelar o rechazar su viaje")
+		}
+		// (c) Motivo OBLIGATORIO en cancelar y rechazar del cliente (DEC-111,
+		// supera DEC-020 #7). Texto libre; vacío o solo espacios no cuenta.
+		if in.Causa == nil || strings.TrimSpace(*in.Causa) == "" {
+			return nil, platformerrors.NewValidacion("operacion: cancelar o rechazar el viaje exige un motivo")
+		}
 	}
 
 	de := estados.EstadoViaje(estadoAct)

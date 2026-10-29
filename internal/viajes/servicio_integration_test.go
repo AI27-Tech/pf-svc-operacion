@@ -15,6 +15,15 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
+// transicionarInterno llama a Transicionar con audiencia Interno (tenant vacío:
+// el aislamiento no aplica a interno). Envuelve el patrón de las transiciones de
+// operador para no repetir los argumentos de audiencia en cada caso, tras E9-T7
+// (DEC-111) que amplió la firma con audiencia + tenant. Las transiciones de
+// cliente se llaman directo con sus argumentos (audiencia "Cliente" + tenant).
+func transicionarInterno(svc *viajes.Servicio, ctx context.Context, id operclient.Id, in operclient.TransicionEntrada, rol string) (*operclient.Viaje, error) {
+	return svc.Transicionar(ctx, id, in, rol, "Interno", "")
+}
+
 // prepara aplica las migraciones de viajes (idempotentes) y limpia los datos,
 // luego devuelve el servicio sobre un pool del rol op_viajes con search_path a
 // viajes (para que el Publisher de outbox resuelva la tabla sin calificar).
