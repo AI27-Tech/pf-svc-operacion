@@ -77,7 +77,7 @@ func TestCierreNormal(t *testing.T) {
 	v := crearInterno(t, ctx, svc)
 	forzarEstado(t, ctx, v.Id, "EN_DESTINO")
 
-	out, err := svc.Transicionar(ctx, v.Id,
+	out, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("normal")}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("cierre normal: %v", err)
@@ -105,7 +105,7 @@ func TestCierreSinMotivo(t *testing.T) {
 	v := crearInterno(t, ctx, svc)
 	forzarEstado(t, ctx, v.Id, "EN_DESTINO")
 
-	if _, err := svc.Transicionar(ctx, v.Id,
+	if _, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO}, "jefe_operativo"); err == nil {
 		t.Error("cerrar sin motivo debió fallar")
 	}
@@ -124,7 +124,7 @@ func TestCierreAnticipadoPorIncidenciaOperador(t *testing.T) {
 	forzarEstado(t, ctx, v.Id, "EN_TRANSITO")
 	abrirIncidencia(t, ctx, v.Id)
 
-	out, err := svc.Transicionar(ctx, v.Id,
+	out, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("cierre anticipado por incidencia (operador): %v", err)
@@ -138,8 +138,11 @@ func TestCierreAnticipadoPorIncidenciaOperador(t *testing.T) {
 }
 
 // TestCierreAnticipadoPorClienteRechazado — el MISMO intento (EN_TRANSITO,
-// por_incidencia, incidencia abierta) por un cliente se rechaza: el cierre es
-// facultad de un operador interno (DEC-060 #1), no del cliente.
+// por_incidencia, incidencia abierta) por un cliente se rechaza: cerrar no es
+// facultad del cliente. Con E9-T7 (DEC-111) el cliente solo puede CANCELADO o
+// RECHAZADO_POR_CLIENTE, así que CERRADO se rechaza antes de la lógica de cierre.
+// El tenant del actor coincide con el cliente del viaje (pasa el aislamiento):
+// el rechazo es por la facultad, no por alcance.
 func TestCierreAnticipadoPorClienteRechazado(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
@@ -149,7 +152,8 @@ func TestCierreAnticipadoPorClienteRechazado(t *testing.T) {
 	abrirIncidencia(t, ctx, v.Id)
 
 	if _, err := svc.Transicionar(ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")}, "cliente"); err == nil {
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")},
+		"cliente", "Cliente", v.ClienteId.String()); err == nil {
 		t.Error("cierre anticipado por un cliente debió rechazarse")
 	}
 	if n := contarEventos(t, ctx, "viaje.cerrado", v.Id.String()); n != 0 {
@@ -167,7 +171,7 @@ func TestCierreAnticipadoSinIncidenciaRechazado(t *testing.T) {
 	forzarEstado(t, ctx, v.Id, "EN_TRANSITO")
 	// sin abrirIncidencia
 
-	if _, err := svc.Transicionar(ctx, v.Id,
+	if _, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado sin incidencia abierta debió rechazarse")
 	}
@@ -187,7 +191,7 @@ func TestCierreAnticipadoMotivoNormalRechazado(t *testing.T) {
 	forzarEstado(t, ctx, v.Id, "EN_TRANSITO")
 	abrirIncidencia(t, ctx, v.Id)
 
-	if _, err := svc.Transicionar(ctx, v.Id,
+	if _, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("normal")}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado con motivo normal debió rechazarse")
 	}

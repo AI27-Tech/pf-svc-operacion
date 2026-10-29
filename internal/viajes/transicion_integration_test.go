@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/google/uuid"
 )
 
@@ -39,7 +40,7 @@ func TestTransicionar(t *testing.T) {
 
 	// --- Transición válida con guarda satisfecha: SOLICITADO -> APROBADO ---
 	v := crearSolicitado(t, ctx, svc, true)
-	out, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo")
+	out, err := transicionarInterno(svc, ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("transición SOLICITADO->APROBADO: %v", err)
 	}
@@ -51,23 +52,23 @@ func TestTransicionar(t *testing.T) {
 	}
 
 	// --- Arista inexistente: APROBADO -> EN_DESTINO (no hay arista) -> error ---
-	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO}, "jefe_operativo"); err == nil {
+	if _, err := transicionarInterno(svc, ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO}, "jefe_operativo"); err == nil {
 		t.Error("transición por arista inexistente debió fallar")
 	}
 
 	// --- Guarda diferida: APROBADO -> ASIGNADO (escolta, Slice 3) -> error ---
-	if _, err := svc.Transicionar(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ASIGNADO}, "jefe_operativo"); err == nil {
+	if _, err := transicionarInterno(svc, ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.ASIGNADO}, "jefe_operativo"); err == nil {
 		t.Error("transición diferida APROBADO->ASIGNADO debió rechazarse")
 	}
 
 	// --- Guarda de motivo: SOLICITADO -> RECHAZADO_POR_AI27 sin causa -> error ---
 	vr := crearSolicitado(t, ctx, svc, true)
-	if _, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27}, "jefe_operativo"); err == nil {
+	if _, err := transicionarInterno(svc, ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27}, "jefe_operativo"); err == nil {
 		t.Error("rechazo sin causa debió fallar")
 	}
 	// con causa -> ok
 	causa := "documentación incompleta"
-	outR, err := svc.Transicionar(ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27, Causa: &causa}, "jefe_operativo")
+	outR, err := transicionarInterno(svc, ctx, vr.Id, operclient.TransicionEntrada{AEstado: operclient.RECHAZADOPORAI27, Causa: &causa}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("rechazo con causa: %v", err)
 	}
@@ -77,12 +78,99 @@ func TestTransicionar(t *testing.T) {
 
 	// --- Guarda de fecha: SOLICITADO sin fecha -> APROBADO -> error ---
 	vsf := crearSolicitado(t, ctx, svc, false)
-	if _, err := svc.Transicionar(ctx, vsf.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
+	if _, err := transicionarInterno(svc, ctx, vsf.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
 		t.Error("aprobar sin fecha_hora_servicio debió fallar")
 	}
 
 	// --- Transición a un viaje inexistente -> NoEncontrado ---
-	if _, err := svc.Transicionar(ctx, uuid.New(), operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
+	if _, err := transicionarInterno(svc, ctx, uuid.New(), operclient.TransicionEntrada{AEstado: operclient.APROBADO}, "jefe_operativo"); err == nil {
 		t.Error("transición de viaje inexistente debió fallar")
+	}
+}
+
+// --- Transición de audiencia Cliente (E9-T7 / DEC-111/112) ------------------
+// El cliente solo puede cancelar o rechazar SU propio viaje, con motivo
+// obligatorio. tenant = cliente (DEC-112): el aislamiento compara el tenant del
+// actor contra el cliente_id del viaje.
+
+// TestClienteCancelaSuViaje — un cliente cancela su propio viaje con motivo:
+// SOLICITADO -> CANCELADO. Caso feliz.
+func TestClienteCancelaSuViaje(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearSolicitado(t, ctx, svc, true)
+	motivo := "ya no necesito el servicio"
+	out, err := svc.Transicionar(ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.CANCELADO, Causa: &motivo},
+		"cliente", "Cliente", v.ClienteId.String())
+	if err != nil {
+		t.Fatalf("cliente cancela su viaje: %v", err)
+	}
+	if out.Estado != operclient.CANCELADO {
+		t.Errorf("estado tras cancelar: got %q, want CANCELADO", out.Estado)
+	}
+	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 1 {
+		t.Errorf("viaje.estado_cambiado en outbox: got %d, want 1", n)
+	}
+}
+
+// TestClienteCancelaSinMotivoRechazado — cancelar sin motivo se rechaza (400):
+// el motivo es obligatorio para el cliente (DEC-111, supera DEC-020 #7).
+func TestClienteCancelaSinMotivoRechazado(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearSolicitado(t, ctx, svc, true)
+	if _, err := svc.Transicionar(ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.CANCELADO},
+		"cliente", "Cliente", v.ClienteId.String()); err == nil {
+		t.Error("cancelar sin motivo debió rechazarse")
+	}
+	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 0 {
+		t.Errorf("no debió publicarse transición: got %d, want 0", n)
+	}
+}
+
+// TestClienteCancelaViajeAjenoNoEncontrado — un cliente intenta cancelar el
+// viaje de OTRO cliente (su tenant no coincide con el cliente_id del viaje): se
+// trata como inexistente (404), no 403, para no revelar que el viaje existe.
+func TestClienteCancelaViajeAjenoNoEncontrado(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearSolicitado(t, ctx, svc, true)
+	motivo := "intento sobre viaje ajeno"
+	otroTenant := uuid.New().String() // distinto del cliente_id del viaje
+	_, err := svc.Transicionar(ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.CANCELADO, Causa: &motivo},
+		"cliente", "Cliente", otroTenant)
+	if err == nil {
+		t.Fatal("cancelar un viaje ajeno debió fallar")
+	}
+	if cat := platformerrors.AsCategory(err); cat != platformerrors.CategoryNoEncontrado {
+		t.Errorf("categoría de error: got %v, want NoEncontrado (404)", cat)
+	}
+	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 0 {
+		t.Errorf("no debió publicarse transición: got %d, want 0", n)
+	}
+}
+
+// TestClienteAristaNoPermitidaRechazada — un cliente intenta una arista que no
+// le corresponde (APROBADO, de operador): se rechaza por facultad aunque el
+// viaje sea suyo y lleve motivo.
+func TestClienteAristaNoPermitidaRechazada(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearSolicitado(t, ctx, svc, true)
+	motivo := "intento de arista de operador"
+	if _, err := svc.Transicionar(ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.APROBADO, Causa: &motivo},
+		"cliente", "Cliente", v.ClienteId.String()); err == nil {
+		t.Error("un cliente no puede aprobar su viaje; debió rechazarse")
+	}
+	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 0 {
+		t.Errorf("no debió publicarse transición: got %d, want 0", n)
 	}
 }

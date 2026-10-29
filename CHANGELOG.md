@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-10-29 — E9-T7: aislamiento y facultades del cliente en la transición del viaje
+
+**Resumen:** `Transicionar` ahora acota lo que un actor de audiencia Cliente puede hacer sobre un viaje (DEC-111). Tres guardas nuevas, aplicadas solo a audiencia Cliente (un actor Interno conserva el comportamiento previo): (1) aislamiento por tenant — el cliente solo transiciona su propio viaje, comparando el `tenant_id` del token contra `viaje.cliente_id` (tenant = cliente, DEC-112); un viaje ajeno devuelve 404, no 403, para no revelar que existe; (2) el cliente solo puede pedir `CANCELADO` o `RECHAZADO_POR_CLIENTE`, cualquier otra arista se rechaza por facultad (401); (3) motivo obligatorio (texto libre) en cancelar y rechazar del cliente (supera DEC-020 #7). La firma de `Transicionar` gana `audiencia` y `tenantID` (strings planos, derivados de los claims en el handler; no se acopla el dominio a `auth`).
+
+**Para quién:** desbloquea la transición de viaje para el portal cliente (E9-T7). El `bff` reenviará a `operacion.transicionarViaje` una vez publicada la superficie de cliente (ola de contrato `tracer.23`, pendiente). Hasta entonces esta guarda ya protege la ruta interna.
+
+**Shortcut (DEC-112):** la igualdad tenant = cliente es regla de dominio ratificada, pero su garantía end-to-end depende de la semilla de tenants, del alta que iguala los UUID y del vínculo usuario↔cliente (DEC-045), aún pendientes. La comparación es correcta en lógica; su blindaje real llega cuando esas piezas existan.
+
+**Verificación:** `gofmt`, `go vet`, `go build ./...` y `go test ./...` en verde contra Postgres 16 (incluye cuatro casos nuevos de cliente: cancela su viaje, cancela sin motivo, cancela viaje ajeno → 404, arista no permitida → rechazo; y los seis de cierre siguen pasando).
+
 ## 2026-10-28 — E3-T1: publicar viaje.mensajeria_habilitada al crear el viaje
 
 **Resumen:** al crear un viaje, operacion publica ahora `viaje.mensajeria_habilitada` en la MISMA transacción que `viaje.creado`, para que mensajeria cree la conversación del viaje (E3-T1, DEC-016 #1). Hasta ahora solo se emitía `viaje.creado`, así que el consumidor de mensajeria no tenía disparador real. Se emite siempre al crear, sin importar el estado inicial (SOLICITADO del cliente o APROBADO del interno): la conversación existe por viaje, no por estado.
