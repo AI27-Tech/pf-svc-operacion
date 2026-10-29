@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-10-28 — E3-T1: publicar viaje.mensajeria_habilitada al crear el viaje
+
+**Resumen:** al crear un viaje, operacion publica ahora `viaje.mensajeria_habilitada` en la MISMA transacción que `viaje.creado`, para que mensajeria cree la conversación del viaje (E3-T1, DEC-016 #1). Hasta ahora solo se emitía `viaje.creado`, así que el consumidor de mensajeria no tenía disparador real. Se emite siempre al crear, sin importar el estado inicial (SOLICITADO del cliente o APROBADO del interno): la conversación existe por viaje, no por estado.
+
+**Para quién:** para `mensajeria`, consumidor durable de `viaje.mensajeria_habilitada` (registro.tipos.yaml). Sin este evento, la conversación de un viaje nunca se crearía.
+
+**Cambios:**
+- `internal/viajes/servicio.go`: `Crear` publica un segundo `outbox.Event{Tipo:"viaje.mensajeria_habilitada"}` tras `viaje.creado`, mismo `AgregadoID` (viaje_id), payload `{viaje_id, cliente_id, creado_en}`. El `cliente_id` va porque es la fuente del tenant/alcance de la conversación aguas abajo (DEC-049, DEC-045 #8).
+- `internal/viajes/servicio_integration_test.go`: `TestCrearObtenerListar` afirma ahora 1 fila de `viaje.mensajeria_habilitada` en el outbox, además de `viaje.creado`.
+
+**Verificación:** `go build/vet ./...`, `gofmt`, `arch-test` verdes. `go test ./internal/viajes/` contra Postgres 16 real: `TestCrearObtenerListar` PASS.
+
 ## 2026-10-28 — tracer.21: subir el pin de contrato (ficha técnica E8-T12 / histórico E8-T13)
 
 **Resumen:** se sube el pin de `pf-pkg-contracts` de `v0.1.0-tracer.20` a `v0.1.0-tracer.21`. tracer.21 es aditivo (ficha técnica y proyección del histórico al bff); no toca ninguna ruta, esquema ni enum que `operacion` use. Solo `go.mod`/`go.sum`; sin cambio de código ni de comportamiento.
