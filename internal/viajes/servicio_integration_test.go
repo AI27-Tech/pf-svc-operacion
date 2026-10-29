@@ -15,6 +15,15 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
+// transicionarInterno llama a Transicionar con audiencia Interno (tenant vacío:
+// el aislamiento no aplica a interno). Envuelve el patrón de las transiciones de
+// operador para no repetir los argumentos de audiencia en cada caso, tras E9-T7
+// (DEC-111) que amplió la firma con audiencia + tenant. Las transiciones de
+// cliente se llaman directo con sus argumentos (audiencia "Cliente" + tenant).
+func transicionarInterno(svc *viajes.Servicio, ctx context.Context, id operclient.Id, in operclient.TransicionEntrada, rol string) (*operclient.Viaje, error) {
+	return svc.Transicionar(ctx, id, in, rol, "Interno", "")
+}
+
 // prepara aplica las migraciones de viajes (idempotentes) y limpia los datos,
 // luego devuelve el servicio sobre un pool del rol op_viajes con search_path a
 // viajes (para que el Publisher de outbox resuelva la tabla sin calificar).
@@ -90,6 +99,14 @@ func TestCrearObtenerListar(t *testing.T) {
 	// --- viaje.creado quedó en el outbox, en la misma tx ---
 	if n := contarEventos(t, ctx, "viaje.creado", v.Id.String()); n != 1 {
 		t.Errorf("viaje.creado en outbox: got %d, want 1", n)
+	}
+
+	// --- viaje.mensajeria_habilitada también, en la misma tx (DEC-016 #1): la
+	// conversación se habilita al crear el viaje, sin importar el estado inicial
+	// (aquí APROBADO, creado por interno); mensajeria lo consume para crear la
+	// conversación (E3-T1). ---
+	if n := contarEventos(t, ctx, "viaje.mensajeria_habilitada", v.Id.String()); n != 1 {
+		t.Errorf("viaje.mensajeria_habilitada en outbox: got %d, want 1", n)
 	}
 
 	// --- Obtener devuelve el detalle con destinos en orden y sin condiciones ---
