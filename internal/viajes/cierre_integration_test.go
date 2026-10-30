@@ -53,13 +53,13 @@ func motivoCierreDeOutbox(t *testing.T, ctx context.Context, viajeID string) str
 // crearInterno crea un viaje en estado APROBADO (rol interno), base para forzar
 // luego el estado de origen del cierre.
 func crearInterno(t *testing.T, ctx context.Context, svc interface {
-	Crear(context.Context, operclient.CrearViajeEntrada, string) (*operclient.Viaje, error)
+	Crear(context.Context, operclient.CrearViajeEntrada, string, string) (*operclient.Viaje, error)
 }) *operclient.Viaje {
 	t.Helper()
 	cli := uuid.New()
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &cli, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}},
-	}, "jefe_operativo")
+	}, "jefe_operativo", "")
 	if err != nil {
 		t.Fatalf("crear viaje interno: %v", err)
 	}

@@ -672,13 +672,15 @@ type consultas struct {
 }
 
 func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error) {
-	// El estado inicial lo fija el rol del creador (DEC-026). El rol viaja en los
-	// claims del token, que el middleware inyecta en el ctx (en core, vía bff).
+	// El estado inicial lo fija el rol del creador (DEC-026). Para un cliente, el
+	// cliente_id del viaje se deriva de su tenant (DEC-112: tenant == cliente_id),
+	// no del cuerpo. Rol y tenant viajan en los claims del token, que el
+	// middleware inyecta en el ctx (en core, vía bff).
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: crearViaje sin claims en el contexto")
 	}
-	return c.m.viajes.Crear(ctx, body, claims.Rol)
+	return c.m.viajes.Crear(ctx, body, claims.Rol, claims.TenantID)
 }
 
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {

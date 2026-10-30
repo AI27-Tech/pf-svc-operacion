@@ -85,7 +85,7 @@ func TestCrearObtenerListar(t *testing.T) {
 			{Nombre: "Guadalajara", NumeroEnvio: ptr("ENV-1")},
 			{Nombre: "Tepic"},
 		},
-	}, "jefe_operativo")
+	}, "jefe_operativo", "")
 	if err != nil {
 		t.Fatalf("Crear (interno): %v", err)
 	}
@@ -130,16 +130,20 @@ func TestCrearObtenerListar(t *testing.T) {
 		t.Errorf("condiciones activas: got %d, want 0", len(det.CondicionesActivas))
 	}
 
-	// --- Crear como cliente: estado inicial SOLICITADO (DEC-026) ---
+	// --- Crear como cliente: estado inicial SOLICITADO (DEC-026); el cliente_id
+	// se deriva del tenant del token (DEC-112), no del cuerpo ---
 	cli := uuid.New()
 	v2, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
-		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "cliente")
+		Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
+	}, "cliente", cli.String())
 	if err != nil {
 		t.Fatalf("Crear (cliente): %v", err)
 	}
 	if v2.Estado != operclient.SOLICITADO {
 		t.Errorf("estado inicial cliente: got %q, want SOLICITADO", v2.Estado)
+	}
+	if v2.ClienteId == nil || *v2.ClienteId != cli {
+		t.Errorf("cliente_id derivado del tenant: got %v, want %v", v2.ClienteId, cli)
 	}
 
 	// --- Listar filtra por estado: APROBADO contiene v y no v2 ---
@@ -175,17 +179,17 @@ func TestCrearValidaciones(t *testing.T) {
 	svc := prepara(t, ctx)
 	cli := uuid.New()
 
-	// Sin cliente_id → inválido (flujo del operador interno exige cliente_id).
+	// Rol interno sin cliente_id → inválido (el operador debe elegir el cliente).
 	if _, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "cliente"); err == nil {
-		t.Error("Crear sin cliente_id debió fallar")
+	}, "jefe_operativo", ""); err == nil {
+		t.Error("Crear interno sin cliente_id debió fallar")
 	}
 
-	// Sin destinos → inválido.
+	// Sin destinos → inválido (cliente, cliente_id derivado del tenant).
 	if _, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
-		ClienteId: &cli, Origen: "O",
-	}, "cliente"); err == nil {
+		Origen: "O",
+	}, "cliente", cli.String()); err == nil {
 		t.Error("Crear sin destinos debió fallar")
 	}
 
@@ -202,7 +206,7 @@ func TestFijarEta(t *testing.T) {
 
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "jefe_operativo")
+	}, "jefe_operativo", "")
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}
@@ -253,7 +257,7 @@ func TestFijarEtaRechazos(t *testing.T) {
 	cli := uuid.New()
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "jefe_operativo")
+	}, "jefe_operativo", "")
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}

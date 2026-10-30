@@ -13,7 +13,7 @@ import (
 // crearSolicitado crea un viaje en estado SOLICITADO (rol cliente). Si conFecha
 // es true, fija fecha_hora_servicio (necesaria para la guarda de aprobación).
 func crearSolicitado(t *testing.T, ctx context.Context, svc interface {
-	Crear(context.Context, operclient.CrearViajeEntrada, string) (*operclient.Viaje, error)
+	Crear(context.Context, operclient.CrearViajeEntrada, string, string) (*operclient.Viaje, error)
 }, conFecha bool) *operclient.Viaje {
 	t.Helper()
 	cli := uuid.New()
@@ -24,7 +24,10 @@ func crearSolicitado(t *testing.T, ctx context.Context, svc interface {
 		f := time.Now().Add(24 * time.Hour).UTC()
 		in.FechaHoraServicio = &f
 	}
-	v, err := svc.Crear(ctx, in, "cliente")
+	// rol cliente: el cliente_id se deriva del tenant (DEC-112). Se pasa cli como
+	// tenant para que el viaje quede con ese cliente_id, que las transiciones de
+	// aislamiento comparan.
+	v, err := svc.Crear(ctx, in, "cliente", cli.String())
 	if err != nil {
 		t.Fatalf("crear SOLICITADO: %v", err)
 	}
