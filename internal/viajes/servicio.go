@@ -41,15 +41,34 @@ func NewServicio(tx BeginTx, pub *outbox.Publisher) *Servicio {
 // shortcut: tamaño fijo; hacerlo configurable si el panel lo pide.
 const paginaMax = 50
 
+// rolCliente es el rol del usuario de audiencia Cliente (DEC-026/DEC-054). Un
+// cliente crea en SOLICITADO y su cliente_id se deriva del tenant (DEC-112).
+const rolCliente = "cliente"
+
 // Crear registra un viaje nuevo y publica viaje.creado en la MISMA transacción
 // (P17). El estado inicial lo fija el rol del creador (DEC-026): `cliente` crea
 // en SOLICITADO (pendiente de aprobación); un rol interno crea en APROBADO. El
-// id lo genera la app (el esquema no tiene DEFAULT).
-func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, rol string) (*operclient.Viaje, error) {
+// cliente_id de un viaje de cliente se deriva de su tenant (DEC-112: para un
+// usuario de audiencia Cliente, tenant_id == cliente_id), no del cuerpo: el
+// cliente no captura su propio id (DEC-112 #5). Un rol interno sí lo manda en el
+// cuerpo (elige el cliente en el selector, E8-T11). El id lo genera la app.
+func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, rol, tenant string) (*operclient.Viaje, error) {
+	if rol == rolCliente {
+		// El cliente no captura su cliente_id; se deriva del tenant del token. Un
+		// cliente_id en el cuerpo se ignora (no puede crear viajes de otro cliente).
+		// shortcut: la igualdad tenant==cliente_id (DEC-112) es correcta en lógica
+		// pero su blindaje end-to-end depende de la semilla de tenants, del alta que
+		// fije identidad.tenant.id == catalogos.cliente.id, y de DEC-045. Revisar
+		// cuando esas piezas existan.
+		tid, err := uuid.Parse(tenant)
+		if err != nil {
+			return nil, platformerrors.NewValidacion("operacion: tenant del cliente inválido en el token")
+		}
+		cid := operclient.Id(tid)
+		in.ClienteId = &cid
+	}
 	if in.ClienteId == nil {
-		// shortcut: en V1 el cliente_id llega en el cuerpo (flujo del operador
-		// interno). Resolver el cliente_id del propio token en el portal
-		// self-service es un pendiente (vínculo identidad→cliente sin definir).
+		// Rol interno sin cliente en el cuerpo: el operador debe elegir el cliente.
 		return nil, platformerrors.NewValidacion("operacion: cliente_id es obligatorio")
 	}
 	if len(in.Destinos) == 0 {
@@ -142,7 +161,7 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 // estadoInicialPara aplica DEC-026: solo el rol `cliente` crea en SOLICITADO;
 // los roles internos crean en APROBADO.
 func estadoInicialPara(rol string) operclient.EstadoViaje {
-	if rol == "cliente" {
+	if rol == rolCliente {
 		return operclient.SOLICITADO
 	}
 	return operclient.APROBADO

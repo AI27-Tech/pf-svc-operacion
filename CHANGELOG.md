@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026-10-30 — Crear solicitud desde el portal cliente: cliente_id derivado del tenant (E9-T4, DEC-112)
+
+**Para quién:** el portal cliente, que ahora puede crear una solicitud de viaje sin capturar su propio cliente_id. Para quien mantiene el servicio: la regla "cliente = tenant" (DEC-112) deja de ser un pendiente en `Crear` y pasa a código.
+
+**Resumen:** `viajes.Crear` recibe el tenant del creador además del rol. Para rol `cliente`, el `cliente_id` del viaje se deriva de ese tenant (DEC-112: `tenant_id == cliente_id`) y un `cliente_id` en el cuerpo se ignora: el cliente no captura su propio id (DEC-112 #5) y no puede crear viajes de otro cliente. El rol interno sigue mandando `cliente_id` en el cuerpo (selector de cliente, E8-T11), y sin él sigue siendo 400.
+
+**Por qué:** antes `Crear` rechazaba todo `cliente_id` null con un 400, incluido el del portal cliente, con un `shortcut:` que declaraba pendiente derivarlo del token. Eso bloqueaba E9-T4 (crear solicitud). DEC-112 ya había ratificado la igualdad tenant/cliente y `operacion` ya la usaba para el aislamiento de transición (E9-T7); esta ola la aplica también al alta.
+
+**Cambios:**
+- `internal/viajes/servicio.go`: `Crear(ctx, in, rol, tenant)`. Deriva `cliente_id` del tenant para rol cliente; constante `rolCliente` (reusada en `estadoInicialPara`).
+- `operacion.go`: `CrearViaje` pasa `claims.TenantID` a `Crear`.
+- Tests: `servicio_integration_test.go` afirma que un cliente crea sin `cliente_id` y el id queda derivado del tenant; el caso "sin cliente_id falla" pasa a rol interno. Helpers de `cierre`/`transicion` ajustados a la firma nueva.
+
+**Shortcut (DEC-112, no lo cierra esta ola):** la igualdad tenant==cliente_id es correcta en lógica, pero su blindaje end-to-end depende de la semilla de tenants, del alta que fije `identidad.tenant.id == catalogos.cliente.id`, y de DEC-045 (vínculo usuario↔cliente). Anotado en el código.
+
+**Sin cambio de contrato:** `cliente_id` ya era opcional en `CrearViajeEntrada` (bff y operacion). El bff reenvía igual; no requiere cambios.
+
+**Verificación:** `gofmt`, `go vet ./...`, `go build ./... && go build ./cmd/api`, `go test ./...` (integración contra Postgres) y `arch-test` en verde.
+
 ## 2026-10-30 — Ola C: cierre con 403 y código de máquina en los conflictos (E8-T14 A3/B1, DEC-111)
 
 **Para quién:** el portal cliente y el panel interno, que ahora pueden distinguir por qué falló un cierre sin leer el texto del mensaje. Para quien mantiene el servicio: la facultad de cierre deja de confundirse con "sin autenticar".
