@@ -237,14 +237,15 @@ func guardaDiferida(motivo string) guarda {
 
 // --- Cierre del servicio (E1-T8 / E1-HU-010) --------------------------------
 
-// Motivos de cierre (catálogo cerrado, DEC-013). El cierre NORMAL y el de
-// BITACORA solo ocurren tras la última parada; POR_INCIDENCIA habilita además el
-// cierre anticipado (DEC-020 #6). El motivo viaja en el payload de viaje.cerrado
-// para que `mensajeria` decida la ventana de la conversación (DEC-030/041).
+// Motivos de cierre (catálogo cerrado, DEC-113). NORMAL solo ocurre tras la
+// última parada; POR_INCIDENCIA habilita además el cierre anticipado (DEC-020 #6).
+// Se retiró `bitacora` (era una cita a DEC-013 sin respaldo, DEC-113). El motivo
+// viaja en el payload de viaje.cerrado para que `mensajeria` decida la ventana de
+// la conversación (DEC-030/041). Los valores son los del enum MotivoCierre del
+// contrato (tracer.24).
 const (
-	motivoCierreNormal        = "normal"
-	motivoCierrePorIncidencia = "por_incidencia"
-	motivoCierreBitacora      = "bitacora"
+	motivoCierreNormal        = string(operclient.Normal)
+	motivoCierrePorIncidencia = string(operclient.PorIncidencia)
 )
 
 // rolesQuePuedenCerrar son los roles internos facultados para cerrar un viaje
@@ -260,36 +261,34 @@ var rolesQuePuedenCerrar = map[string]bool{
 // comparten validaciones y la distinción normal/anticipado se deriva del estado
 // de origen:
 //
-//   - Motivo OBLIGATORIO del catálogo normal|por_incidencia|bitacora. Sin motivo
-//     o con un valor fuera del catálogo -> 400 (DEC-013).
-//   - Cierre NORMAL (motivo normal o bitacora): válido solo desde EN_DESTINO o
-//     EN_DESCARGA, es decir con el convoy en una parada (guarda `ultima_parada`
-//     del YAML). Desde EN_TRANSITO NO es un cierre normal.
+//   - Motivo OBLIGATORIO del catálogo normal|por_incidencia. Sin motivo o con un
+//     valor fuera del catálogo -> 400 (DEC-113).
+//   - Cierre NORMAL: válido solo desde EN_DESTINO o EN_DESCARGA, es decir con el
+//     convoy en una parada (guarda `ultima_parada` del YAML). Desde EN_TRANSITO
+//     NO es un cierre normal.
 //   - Cierre ANTICIPADO (desde EN_TRANSITO, antes de llegar a una parada): válido
 //     SOLO con motivo por_incidencia, SOLO por un rol operador interno autorizado
 //     (DEC-020 #6 / DEC-060 #1) y SOLO con una condición INCIDENCIA abierta.
 //
-// shortcut (brecha de contrato, ver .scratch/e1-t8-cierre-viaje/brecha-motivo-de-cierre.md):
-// el motivo de cierre se lee del campo `causa` de TransicionEntrada porque el
-// contrato todavía no tiene un campo `motivo_cierre` con el catálogo. Cuando el
-// contrato gane ese campo, esta lectura cambia a in.MotivoCierre; la regla de
-// negocio no cambia.
+// El motivo se lee de `motivo_cierre` (enum MotivoCierre, tracer.24/DEC-113), que
+// reemplazó el puente previo sobre `causa`. El contrato lo marca opcional (aplica
+// solo al cerrar); aquí es obligatorio para la arista a CERRADO.
 //
 // shortcut (ADR/E6-HU-033 pendiente): "última parada" se aproxima por el estado
 // de origen (EN_DESTINO/EN_DESCARGA). No se verifica que sea literalmente la
 // ÚLTIMA parada de la ruta: no existe un puntero de parada actual en el esquema y
 // la condición exacta de "listo para cerrar" no está fijada en las fuentes.
 func (s *Servicio) validarCierre(ctx context.Context, tx pgx.Tx, id operclient.Id, de estados.EstadoViaje, in operclient.TransicionEntrada, rol string) (string, error) {
-	// Motivo obligatorio (puente sobre `causa`, ver shortcut arriba).
-	if in.Causa == nil || strings.TrimSpace(*in.Causa) == "" {
-		return "", platformerrors.NewValidacion("operacion: el cierre exige un motivo (normal, por_incidencia o bitacora)")
+	// Motivo obligatorio, del campo tipado motivo_cierre (DEC-113).
+	if in.MotivoCierre == nil {
+		return "", platformerrors.NewValidacion("operacion: el cierre exige un motivo (normal o por_incidencia)")
 	}
-	motivo := strings.TrimSpace(*in.Causa)
+	motivo := string(*in.MotivoCierre)
 	switch motivo {
-	case motivoCierreNormal, motivoCierrePorIncidencia, motivoCierreBitacora:
+	case motivoCierreNormal, motivoCierrePorIncidencia:
 		// válido
 	default:
-		return "", platformerrors.NewValidacion("operacion: motivo de cierre inválido %q; use normal, por_incidencia o bitacora", motivo)
+		return "", platformerrors.NewValidacion("operacion: motivo de cierre inválido %q; use normal o por_incidencia", motivo)
 	}
 
 	// Cierre anticipado: desde EN_TRANSITO, antes de llegar a una parada.
