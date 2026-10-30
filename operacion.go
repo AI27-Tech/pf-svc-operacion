@@ -590,10 +590,12 @@ func escribirJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // escribirError traduce un error de la taxonomía de la plataforma al Error del
-// contrato y a su status HTTP, reusando el mapeo de la plataforma.
+// contrato y a su status HTTP, reusando el mapeo de la plataforma. El código de
+// máquina sale de CodigoDe: el Codigo específico del error si lo trae (p. ej.
+// cierre_anticipado_requiere_incidencia), si no el genérico de la categoría.
 func escribirError(w http.ResponseWriter, err error) {
 	cat := platformerrors.AsCategory(err)
-	escribirJSON(w, cat.HTTPStatus(), operclient.Error{Codigo: cat.String(), Mensaje: err.Error()})
+	escribirJSON(w, cat.HTTPStatus(), operclient.Error{Codigo: platformerrors.CodigoDe(err), Mensaje: err.Error()})
 }
 
 // Workers devuelve los workers embebidos (ADR 29 §6): UN publisher de outbox,
