@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026-10-30 — Ola C: cierre con 403 y código de máquina en los conflictos (E8-T14 A3/B1, DEC-111)
+
+**Para quién:** el portal cliente y el panel interno, que ahora pueden distinguir por qué falló un cierre sin leer el texto del mensaje. Para quien mantiene el servicio: la facultad de cierre deja de confundirse con "sin autenticar".
+
+**Resumen:** sube el pin de `pf-pkg-platform-go` a `v0.1.8` y adopta la taxonomía de la Ola C en el cierre del viaje. Los dos conflictos de `validarCierre` pasan a llevar un código de máquina estable: `cierre_anticipado_solo_por_incidencia` (cierre desde `EN_TRANSITO` con motivo distinto de `por_incidencia`) y `cierre_anticipado_requiere_incidencia` (cierre anticipado sin condición `INCIDENCIA` abierta). La facultad de cierre (rol sin permiso) pasa de `NoAutorizado` (401) a `Prohibido` (403): el actor está autenticado, le falta la facultad. El responder emite `CodigoDe(err)` en vez de `Category.String()`, así el código específico viaja en el cuerpo.
+
+**Por qué:** antes los dos conflictos salían con el código genérico `conflicto` y la distinción vivía solo en el mensaje libre, que el cliente no debe parsear. Los códigos ya estaban documentados en la descripción del 409 del contrato (`operacion.yaml`); esta ola los hace reales en runtime. Es A3/B1 de E8-T14, diferido en DEC-111 hasta tener la pieza de plataforma.
+
+**Cambios:**
+- `internal/viajes/transicion.go`: los dos `NewConflicto` del cierre pasan a `NewConflictoCodigo` con su código; los dos `NewNoAutorizado` de la facultad de cierre pasan a `NewProhibido`.
+- `operacion.go`: `escribirError` emite `platformerrors.CodigoDe(err)`.
+- `internal/viajes/cierre_integration_test.go`: dos aserciones nuevas afirman el código específico que el cliente observa.
+- Pin de plataforma a `v0.1.8`.
+
+**Verificación:** `gofmt`, `go vet ./...`, `go build ./... && go build ./cmd/api`, `go test ./...` (integración contra Postgres) y `arch-test` en verde. Sin renombres de enum al subir el pin (§8 no aplica: fue bump de plataforma, no de contratos).
+
 ## 2026-10-29 — E8-T14: motivo de cierre tipado (`motivo_cierre`) y retiro de `bitacora`
 
 **Resumen:** `validarCierre` lee el motivo del campo tipado `motivo_cierre` (enum `MotivoCierre` del contrato `tracer.24`) en vez de `causa`, cerrando el atajo que el propio código marcaba. Se retira `bitacora` del catálogo de motivos (DEC-113: era una cita a DEC-013 sin respaldo, y en código nunca tuvo lógica distinta de `normal`). Los motivos válidos quedan en `normal` y `por_incidencia`; un cierre con `bitacora` o cualquier valor fuera del enum pasa de aceptado a rechazado (400). El pin de contrato sube de `tracer.21` a `tracer.24`.

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/dbtest"
 	"github.com/google/uuid"
 )
@@ -198,6 +199,8 @@ func TestCierreAnticipadoSinIncidenciaRechazado(t *testing.T) {
 	if _, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.PorIncidencia)}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado sin incidencia abierta debió rechazarse")
+	} else if c := codigoDeError(err); c != "cierre_anticipado_requiere_incidencia" {
+		t.Errorf("codigo del conflicto: got %q, want cierre_anticipado_requiere_incidencia", c)
 	}
 	if n := contarEventos(t, ctx, "viaje.cerrado", v.Id.String()); n != 0 {
 		t.Errorf("no debió publicarse viaje.cerrado: got %d, want 0", n)
@@ -218,5 +221,13 @@ func TestCierreAnticipadoMotivoNormalRechazado(t *testing.T) {
 	if _, err := transicionarInterno(svc, ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.Normal)}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado con motivo normal debió rechazarse")
+	} else if c := codigoDeError(err); c != "cierre_anticipado_solo_por_incidencia" {
+		t.Errorf("codigo del conflicto: got %q, want cierre_anticipado_solo_por_incidencia", c)
 	}
+}
+
+// codigoDeError extrae el Codigo de máquina del PlatformError (el valor que el
+// cliente observa en el cuerpo), reusando CodigoDe de la plataforma.
+func codigoDeError(err error) string {
+	return platformerrors.CodigoDe(err)
 }
