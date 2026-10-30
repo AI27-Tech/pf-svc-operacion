@@ -1,5 +1,17 @@
 # CHANGELOG
 
+## 2026-10-29 — E8-T14: motivo de cierre tipado (`motivo_cierre`) y retiro de `bitacora`
+
+**Resumen:** `validarCierre` lee el motivo del campo tipado `motivo_cierre` (enum `MotivoCierre` del contrato `tracer.24`) en vez de `causa`, cerrando el atajo que el propio código marcaba. Se retira `bitacora` del catálogo de motivos (DEC-113: era una cita a DEC-013 sin respaldo, y en código nunca tuvo lógica distinta de `normal`). Los motivos válidos quedan en `normal` y `por_incidencia`; un cierre con `bitacora` o cualquier valor fuera del enum pasa de aceptado a rechazado (400). El pin de contrato sube de `tracer.21` a `tracer.24`.
+
+**Para quién:** desbloquea E8-T14 en el panel interno. El motivo de cierre ahora es un enum generado, no texto libre en `causa`. El `bff` propaga el campo (paso A.3). La ventana de escritura de la conversación la sigue decidiendo `mensajeria` por el motivo (3 días / 6 meses, DEC-030/041); `operacion` no cambia ahí.
+
+**Cambios:** `internal/viajes/transicion.go`: catálogo de motivos sin `bitacora` (constantes derivadas de `operclient.Normal`/`PorIncidencia`); `validarCierre` lee `in.MotivoCierre` (puntero a enum) en vez de `in.Causa`; mensajes de validación actualizados. `causa` se conserva para la fila de transición, el payload del evento y el motivo de rechazo de AI27 (DEC-020 #2), que no cambian.
+
+**Bump de pin (git-workflow §8):** sin renombres de enum que rompieran el build; `go build ./...` limpio tras el `go get`.
+
+**Verificación:** `gofmt`, `go vet ./...`, `go build ./...` y `go test ./...` en verde contra Postgres 16. Tests de cierre migrados a `motivo_cierre` (helper `ptrMotivo`); caso nuevo `TestCierreMotivoInvalidoRechazado` confirma que `bitacora` ahora se rechaza. Los demás casos de cierre y la transición de cliente (E9-T7) siguen verdes.
+
 ## 2026-10-29 — E9-T7: aislamiento y facultades del cliente en la transición del viaje
 
 **Resumen:** `Transicionar` ahora acota lo que un actor de audiencia Cliente puede hacer sobre un viaje (DEC-111). Tres guardas nuevas, aplicadas solo a audiencia Cliente (un actor Interno conserva el comportamiento previo): (1) aislamiento por tenant — el cliente solo transiciona su propio viaje, comparando el `tenant_id` del token contra `viaje.cliente_id` (tenant = cliente, DEC-112); un viaje ajeno devuelve 404, no 403, para no revelar que existe; (2) el cliente solo puede pedir `CANCELADO` o `RECHAZADO_POR_CLIENTE`, cualquier otra arista se rechaza por facultad (401); (3) motivo obligatorio (texto libre) en cancelar y rechazar del cliente (supera DEC-020 #7). La firma de `Transicionar` gana `audiencia` y `tenantID` (strings planos, derivados de los claims en el handler; no se acopla el dominio a `auth`).
