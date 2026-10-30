@@ -294,17 +294,19 @@ func (s *Servicio) validarCierre(ctx context.Context, tx pgx.Tx, id operclient.I
 	// Cierre anticipado: desde EN_TRANSITO, antes de llegar a una parada.
 	if de == estados.EstadoEnTransito {
 		if motivo != motivoCierrePorIncidencia {
-			return "", platformerrors.NewConflicto("operacion: el cierre anticipado (antes de la última parada) solo es válido con motivo por_incidencia")
+			return "", platformerrors.NewConflictoCodigo("cierre_anticipado_solo_por_incidencia",
+				"operacion: el cierre anticipado (antes de la última parada) solo es válido con motivo por_incidencia")
 		}
 		if !rolesQuePuedenCerrar[rol] {
-			return "", platformerrors.NewNoAutorizado("operacion: solo un operador interno autorizado puede cerrar anticipadamente un viaje")
+			return "", platformerrors.NewProhibido("operacion: solo un operador interno autorizado puede cerrar anticipadamente un viaje")
 		}
 		abierta, err := s.hayIncidenciaAbierta(ctx, tx, id)
 		if err != nil {
 			return "", err
 		}
 		if !abierta {
-			return "", platformerrors.NewConflicto("operacion: el cierre anticipado requiere una condición INCIDENCIA abierta")
+			return "", platformerrors.NewConflictoCodigo("cierre_anticipado_requiere_incidencia",
+				"operacion: el cierre anticipado requiere una condición INCIDENCIA abierta")
 		}
 		return motivo, nil
 	}
@@ -313,7 +315,7 @@ func (s *Servicio) validarCierre(ctx context.Context, tx pgx.Tx, id operclient.I
 	// La facultad de cierre es de rol operador interno autorizado en todos los
 	// casos (DEC-060 #1): un cliente nunca cierra.
 	if !rolesQuePuedenCerrar[rol] {
-		return "", platformerrors.NewNoAutorizado("operacion: solo un operador interno autorizado puede cerrar un viaje")
+		return "", platformerrors.NewProhibido("operacion: solo un operador interno autorizado puede cerrar un viaje")
 	}
 	return motivo, nil
 }
