@@ -67,6 +67,10 @@ func crearInterno(t *testing.T, ctx context.Context, svc interface {
 
 func ptrS(s string) *string { return &s }
 
+// ptrMotivo hace puntero a un MotivoCierre (tracer.24): el cierre lee el motivo
+// de motivo_cierre, no de causa (DEC-113).
+func ptrMotivo(m operclient.MotivoCierre) *operclient.MotivoCierre { return &m }
+
 // TestCierreNormal — cierre normal tras la última parada (desde EN_DESTINO), por
 // el jefe_operativo, con motivo "normal": pasa a CERRADO y publica viaje.cerrado
 // con el motivo en el payload.
@@ -78,7 +82,7 @@ func TestCierreNormal(t *testing.T) {
 	forzarEstado(t, ctx, v.Id, "EN_DESTINO")
 
 	out, err := transicionarInterno(svc, ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("normal")}, "jefe_operativo")
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.Normal)}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("cierre normal: %v", err)
 	}
@@ -114,6 +118,26 @@ func TestCierreSinMotivo(t *testing.T) {
 	}
 }
 
+// TestCierreMotivoInvalidoRechazado — un motivo fuera del enum (p. ej. el
+// retirado "bitacora", DEC-113) se rechaza con validación. Simula el token que
+// llegaría por el cable; el enum del contrato ya no lo incluye.
+func TestCierreMotivoInvalidoRechazado(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearInterno(t, ctx, svc)
+	forzarEstado(t, ctx, v.Id, "EN_DESTINO")
+
+	motivoRetirado := operclient.MotivoCierre("bitacora")
+	if _, err := transicionarInterno(svc, ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: &motivoRetirado}, "jefe_operativo"); err == nil {
+		t.Error("cerrar con un motivo fuera del catálogo (bitacora) debió fallar")
+	}
+	if n := contarEventos(t, ctx, "viaje.cerrado", v.Id.String()); n != 0 {
+		t.Errorf("no debió publicarse viaje.cerrado: got %d, want 0", n)
+	}
+}
+
 // TestCierreAnticipadoPorIncidenciaOperador — desde EN_TRANSITO, con motivo
 // por_incidencia, una INCIDENCIA abierta y el rol jefe_operativo: se permite.
 func TestCierreAnticipadoPorIncidenciaOperador(t *testing.T) {
@@ -125,7 +149,7 @@ func TestCierreAnticipadoPorIncidenciaOperador(t *testing.T) {
 	abrirIncidencia(t, ctx, v.Id)
 
 	out, err := transicionarInterno(svc, ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")}, "jefe_operativo")
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.PorIncidencia)}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("cierre anticipado por incidencia (operador): %v", err)
 	}
@@ -152,7 +176,7 @@ func TestCierreAnticipadoPorClienteRechazado(t *testing.T) {
 	abrirIncidencia(t, ctx, v.Id)
 
 	if _, err := svc.Transicionar(ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")},
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.PorIncidencia)},
 		"cliente", "Cliente", v.ClienteId.String()); err == nil {
 		t.Error("cierre anticipado por un cliente debió rechazarse")
 	}
@@ -172,7 +196,7 @@ func TestCierreAnticipadoSinIncidenciaRechazado(t *testing.T) {
 	// sin abrirIncidencia
 
 	if _, err := transicionarInterno(svc, ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("por_incidencia")}, "jefe_operativo"); err == nil {
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.PorIncidencia)}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado sin incidencia abierta debió rechazarse")
 	}
 	if n := contarEventos(t, ctx, "viaje.cerrado", v.Id.String()); n != 0 {
@@ -192,7 +216,7 @@ func TestCierreAnticipadoMotivoNormalRechazado(t *testing.T) {
 	abrirIncidencia(t, ctx, v.Id)
 
 	if _, err := transicionarInterno(svc, ctx, v.Id,
-		operclient.TransicionEntrada{AEstado: operclient.CERRADO, Causa: ptrS("normal")}, "jefe_operativo"); err == nil {
+		operclient.TransicionEntrada{AEstado: operclient.CERRADO, MotivoCierre: ptrMotivo(operclient.Normal)}, "jefe_operativo"); err == nil {
 		t.Error("cierre anticipado con motivo normal debió rechazarse")
 	}
 }
