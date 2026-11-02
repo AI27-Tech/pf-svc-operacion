@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026:11:02 16:54 — Transición de viaje en la fachada en proceso (E9-T7/E8-T14)
+
+**Para quién:** `pf-svc-core`, que cablea el puerto `OperacionPort` de bff en proceso. bff v0.1.12 reenvía `transicionarViaje` y core no compilaba sin este método. Para quien mantiene el servicio: la transición en proceso y la HTTP comparten caso de uso, así que no hay dos reglas que mantener.
+
+**Resumen:** `ConsultasAPI` gana `TransicionarViaje(ctx, id, body)`. Llama al mismo `viajes.Transicionar` que `POST /api/v1/viajes/{id}/transiciones`, con rol, audiencia y tenant tomados de los claims del ctx (paridad I3). Sin claims devuelve `NoAutorizado`: la guarda del cierre necesita el rol y el aislamiento de cliente la audiencia y el tenant.
+
+**Cambios:**
+- `operacion.go`: método `TransicionarViaje` en `ConsultasAPI` y su implementación; el doc comment ya no dice que la transición queda fuera de la fachada.
+- `consultas_test.go`: la réplica del puerto de bff incluye `TransicionarViaje`.
+- `consultas_integration_test.go` (nuevo): por la fachada, SOLICITADO→APROBADO avanza; APROBADO→EN_DESTINO da 409 igual que la ruta HTTP; sin claims da `NoAutorizado` y el viaje no se mueve.
+
+**Sin cambio de contrato ni de HTTP:** los tipos ya existen en el pin `tracer.24`; la ruta HTTP no se tocó.
+
+**Archivos modificados:**
+- `operacion.go`
+- `consultas_test.go`
+- `consultas_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026-10-30 — Crear solicitud desde el portal cliente: cliente_id derivado del tenant (E9-T4, DEC-112)
 
 **Para quién:** el portal cliente, que ahora puede crear una solicitud de viaje sin capturar su propio cliente_id. Para quien mantiene el servicio: la regla "cliente = tenant" (DEC-112) deja de ser un pendiente en `Crear` y pasa a código.

@@ -20,6 +20,7 @@ type puertoOperacionBFF interface {
 	ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error)
 	ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error)
 	RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
+	TransicionarViaje(ctx context.Context, id operclient.Id, body operclient.TransicionEntrada) (*operclient.Viaje, error)
 }
 
 // TestConsultasSatisfaceElPuertoDeBFF comprueba, en tiempo de compilación, que
