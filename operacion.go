@@ -647,9 +647,9 @@ func (m *Module) Consultas() ConsultasAPI {
 // y leer el detalle para la composición de hitos (ADR 27).
 //
 // obtenerViaje devuelve ViajeDetalle (no Viaje): bff compone los hitos a partir
-// del detalle, que incluye las condiciones activas (E2-T2/E2-T3). Las escrituras
-// internas (transición, asignación) NO entran aquí: no son arista de bff
-// (bff.md (f)); se agregan a sus propios handlers cuando se implementen.
+// del detalle, que incluye las condiciones activas (E2-T2/E2-T3). La asignación
+// NO entra aquí: no es arista de bff (bff.md (f)). La transición SÍ: bff reenvía
+// transicionarViaje (portal E9-T7, panel E8-T14) y en core esa arista va en proceso.
 //
 // SCAFFOLD: el servicio de dominio todavía no existe, así que los tres métodos
 // devuelven "no implementado" en runtime. La fachada fija la FORMA tipada con el
@@ -665,6 +665,9 @@ type ConsultasAPI interface {
 	ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error)
 	ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error)
 	RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error)
+	// TransicionarViaje es la transición que bff reenvía (E9-T7/E8-T14); mismo caso de
+	// uso que POST /api/v1/viajes/{id}/transiciones (I3).
+	TransicionarViaje(ctx context.Context, id operclient.Id, body operclient.TransicionEntrada) (*operclient.Viaje, error)
 }
 
 type consultas struct {
@@ -711,4 +714,16 @@ func (c *consultas) RegistrarDescargaViaje(ctx context.Context, id operclient.Id
 		actor = claims.Subject
 	}
 	return c.m.descargas.Registrar(ctx, id, actor)
+}
+
+// TransicionarViaje delega en el mismo caso de uso que handleTransicionar (I3).
+// Rol, audiencia y tenant salen de los claims del ctx igual que en HTTP. Sin
+// claims es error: la guarda del cierre exige el rol y el aislamiento de cliente
+// la audiencia/tenant, y un actor vacío no debe pasar como si fuera interno.
+func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, body operclient.TransicionEntrada) (*operclient.Viaje, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: transicionarViaje sin claims en el contexto")
+	}
+	return c.m.viajes.Transicionar(ctx, id, body, claims.Rol, string(claims.Audiencia), claims.TenantID)
 }
