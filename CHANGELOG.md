@@ -1,5 +1,22 @@
 # CHANGELOG
 
+## 2026:11:02 19:21 — Roles de incidencia alineados con DEC-060 (monitorista y coordinador)
+
+**Para quién:** el monitorista, que en la demo no podía abrir una incidencia (401 "el rol monitorista no puede abrir una incidencia", medido en el smoke del flujo interno sobre core), y el coordinador, que no podía abrir ni resolver. Para quien mantiene el servicio: era el único lugar que seguía usando el rol retirado `operador` (previo a DEC-045).
+
+**Resumen:** abrir una incidencia queda para `monitorista`, `supervisor`, `coordinador` y `administrador`; resolverla, para `supervisor`, `coordinador` y `administrador` (E1-T6, DEC-060). El rol `operador` deja de abrir. Reacción y cliente siguen rechazados (DEC-028).
+
+**Cambios:**
+- `internal/viajes/incidencia.go`: `rolesQuePuedenAbrirIncidencia` y `rolesQuePuedenResolverIncidencia` con los roles de DEC-060; doc comments al día.
+- `internal/viajes/incidencia_integration_test.go`: las pruebas usan `monitorista` en lugar de `operador`; nueva `TestCoordinadorAbreYResuelveIncidencia` (coordinador abre y resuelve; `operador` recibe `NoAutorizado`).
+
+**Sin cambio de contrato ni de HTTP:** solo cambia qué roles pasan la guarda.
+
+**Archivos modificados:**
+- `internal/viajes/incidencia.go`
+- `internal/viajes/incidencia_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026:11:02 16:54 — Transición de viaje en la fachada en proceso (E9-T7/E8-T14)
 
 **Para quién:** `pf-svc-core`, que cablea el puerto `OperacionPort` de bff en proceso. bff v0.1.12 reenvía `transicionarViaje` y core no compilaba sin este método. Para quien mantiene el servicio: la transición en proceso y la HTTP comparten caso de uso, así que no hay dos reglas que mantener.

@@ -30,20 +30,22 @@ import (
 // íntegro en viajes.
 
 // rolesQuePuedenAbrirIncidencia son los roles facultados para ABRIR una
-// incidencia (requisito del ticket E1-T6): operador, supervisor y administrador.
-// Reacción NO (DEC-028): su visibilidad es solo del caso alertado, no abre
-// condiciones. El cliente tampoco.
+// incidencia (E1-T6, DEC-060): monitorista, supervisor y coordinador dentro de
+// su alcance, y administrador. Reacción NO (DEC-028): su visibilidad es solo del
+// caso alertado, no abre condiciones. El cliente tampoco.
 var rolesQuePuedenAbrirIncidencia = map[string]bool{
-	"operador":      true,
+	"monitorista":   true,
 	"supervisor":    true,
+	"coordinador":   true,
 	"administrador": true,
 }
 
 // rolesQuePuedenResolverIncidencia son los roles facultados para RESOLVER una
-// incidencia (requisito del ticket E1-T6): SOLO supervisor o administrador. Un
-// operador puede abrir pero no resolver (rechazo por rol).
+// incidencia (E1-T6, DEC-060): supervisor, coordinador o administrador. Un
+// monitorista puede abrir pero no resolver (rechazo por rol, Q221).
 var rolesQuePuedenResolverIncidencia = map[string]bool{
 	"supervisor":    true,
+	"coordinador":   true,
 	"administrador": true,
 }
 
@@ -53,7 +55,7 @@ var rolesQuePuedenResolverIncidencia = map[string]bool{
 // y publica viaje.condicion_abierta por el outbox de viajes. NO cambia
 // viaje.estado.
 //
-// rol es el rol del actor (claims.Rol): operador, supervisor o administrador.
+// rol es el rol del actor (claims.Rol): monitorista, supervisor, coordinador o administrador.
 // Reacción y cliente se rechazan por rol (DEC-028).
 //
 // Dos incidencias abiertas del mismo viaje las impide el índice único parcial
@@ -128,7 +130,7 @@ func (s *Servicio) AbrirIncidencia(ctx context.Context, viajeID operclient.Id, i
 // cambia viaje.estado —"el viaje regresa a su curso normal al resolverse" (§C.2),
 // el progreso nunca se perdió—.
 //
-// rol es el rol del actor: SOLO supervisor o administrador (un operador que abrió
+// rol es el rol del actor: SOLO supervisor, coordinador o administrador (un monitorista que abrió
 // no puede resolver, rechazo por rol). resolucionID es el id de la condición
 // (el id público de la Incidencia).
 //
