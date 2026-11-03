@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026:11:02 19:21 — Roles de incidencia alineados con DEC-060 (monitorista y coordinador)
+
+**Para quién:** el monitorista, que en la demo no podía abrir una incidencia (401 "el rol monitorista no puede abrir una incidencia", medido en el smoke del flujo interno sobre core), y el coordinador, que no podía abrir ni resolver. Para quien mantiene el servicio: era el único lugar que seguía usando el rol retirado `operador` (previo a DEC-045).
+
+**Resumen:** abrir una incidencia queda para `monitorista`, `supervisor`, `coordinador` y `administrador`; resolverla, para `supervisor`, `coordinador` y `administrador` (E1-T6, DEC-060). El rol `operador` deja de abrir. Reacción y cliente siguen rechazados (DEC-028).
+
+**Cambios:**
+- `internal/viajes/incidencia.go`: `rolesQuePuedenAbrirIncidencia` y `rolesQuePuedenResolverIncidencia` con los roles de DEC-060; doc comments al día.
+- `internal/viajes/incidencia_integration_test.go`: las pruebas usan `monitorista` en lugar de `operador`; nueva `TestCoordinadorAbreYResuelveIncidencia` (coordinador abre y resuelve; `operador` recibe `NoAutorizado`).
+
+**Sin cambio de contrato ni de HTTP:** solo cambia qué roles pasan la guarda.
+
+**Archivos modificados:**
+- `internal/viajes/incidencia.go`
+- `internal/viajes/incidencia_integration_test.go`
+
 ## 2026:11:02 17:54 — Flujo interno del panel en la fachada en proceso (bff como única puerta pública)
 
 **Para quién:** `pf-svc-core`, que cablea en proceso el puerto `OperacionPort` de bff. El Lead decidió que bff sea la única puerta pública; para que el panel interno deje de llamar las rutas nativas de operacion, bff necesita estas operaciones en la fachada. Para quien mantiene el servicio: cada método llama al mismo caso de uso que su ruta HTTP, así que no hay dos reglas que mantener.
@@ -17,6 +33,7 @@
 - `operacion.go`
 - `consultas_test.go`
 - `consultas_integration_test.go`
+
 - `CHANGELOG.md`
 
 ## 2026:11:02 16:54 — Transición de viaje en la fachada en proceso (E9-T7/E8-T14)

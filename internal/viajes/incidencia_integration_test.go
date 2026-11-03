@@ -36,7 +36,7 @@ func TestAbrirIncidenciaNoCambiaEstado(t *testing.T) {
 	estadoAntes := estadoDe(t, ctx, v.Id)
 
 	inc, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "robo_tentativa", Descripcion: ptrS("intento en caseta")}, "operador")
+		operclient.IncidenciaEntrada{TipoInterno: "robo_tentativa", Descripcion: ptrS("intento en caseta")}, "monitorista")
 	if err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
@@ -85,24 +85,24 @@ func TestAbrirIncidenciaRolReaccionRechazado(t *testing.T) {
 	}
 }
 
-// TestResolverIncidenciaSoloSupervisorOAdmin — un operador puede ABRIR pero NO
+// TestResolverIncidenciaSoloSupervisorOAdmin — un monitorista puede ABRIR pero NO
 // resolver; resolver es SOLO de supervisor o administrador. El intento del
-// operador se rechaza por rol y la condición sigue abierta.
+// monitorista se rechaza por rol y la condición sigue abierta.
 func TestResolverIncidenciaSoloSupervisorOAdmin(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
 	v := crearInterno(t, ctx, svc)
 	inc, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "operador")
+		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "monitorista")
 	if err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
 
-	// Operador NO puede resolver: rechazo por rol.
+	// Monitorista NO puede resolver: rechazo por rol.
 	if _, err := svc.ResolverIncidencia(ctx, v.Id, inc.Id,
-		operclient.ResolucionIncidenciaEntrada{Resolucion: "atendida"}, "operador"); err == nil {
-		t.Error("resolver por un operador debió rechazarse (solo supervisor/administrador)")
+		operclient.ResolucionIncidenciaEntrada{Resolucion: "atendida"}, "monitorista"); err == nil {
+		t.Error("resolver por un monitorista debió rechazarse (solo supervisor, coordinador o administrador)")
 	}
 	// Sigue abierta: ningún viaje.condicion_cerrada.
 	if n := contarEventos(t, ctx, "viaje.condicion_cerrada", v.Id.String()); n != 0 {
@@ -149,11 +149,11 @@ func TestDosIncidenciasAbiertasConflicto(t *testing.T) {
 
 	v := crearInterno(t, ctx, svc)
 	if _, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "robo"}, "operador"); err != nil {
+		operclient.IncidenciaEntrada{TipoInterno: "robo"}, "monitorista"); err != nil {
 		t.Fatalf("primera AbrirIncidencia: %v", err)
 	}
 	_, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "robo"}, "operador")
+		operclient.IncidenciaEntrada{TipoInterno: "robo"}, "monitorista")
 	if err == nil {
 		t.Fatal("abrir una segunda incidencia debió fallar por el índice único parcial")
 	}
@@ -177,7 +177,7 @@ func TestCoexistenciaIncidenciaYEstadia(t *testing.T) {
 	estadoAntes := estadoDe(t, ctx, v.Id)
 
 	if _, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "bloqueo_vial"}, "operador"); err != nil {
+		operclient.IncidenciaEntrada{TipoInterno: "bloqueo_vial"}, "monitorista"); err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
 	est, err := svc.AbrirEstadia(ctx, v.Id,
@@ -238,7 +238,7 @@ func TestIncidenciasActivasExponeTipoInterno(t *testing.T) {
 
 	// Abrir una incidencia con un tipo_interno conocido.
 	inc, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "robo_tentativa", Descripcion: ptrS("intento en caseta")}, "operador")
+		operclient.IncidenciaEntrada{TipoInterno: "robo_tentativa", Descripcion: ptrS("intento en caseta")}, "monitorista")
 	if err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
@@ -292,7 +292,34 @@ func TestAbrirIncidenciaTipoInternoObligatorio(t *testing.T) {
 
 	v := crearInterno(t, ctx, svc)
 	if _, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "   "}, "operador"); err == nil {
+		operclient.IncidenciaEntrada{TipoInterno: "   "}, "monitorista"); err == nil {
 		t.Error("abrir incidencia sin tipo_interno debió fallar")
+	}
+}
+
+// TestCoordinadorAbreYResuelveIncidencia — DEC-060: el coordinador tiene las
+// facultades del supervisor, así que abre y resuelve dentro de su alcance; y el
+// rol retirado "operador" (previo a DEC-045) ya no abre nada.
+func TestCoordinadorAbreYResuelveIncidencia(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearInterno(t, ctx, svc)
+	if _, err := svc.AbrirIncidencia(ctx, v.Id,
+		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "operador"); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
+		t.Fatalf("operador (rol retirado): got %v, want NoAutorizado", err)
+	}
+	inc, err := svc.AbrirIncidencia(ctx, v.Id,
+		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "coordinador")
+	if err != nil {
+		t.Fatalf("AbrirIncidencia (coordinador): %v", err)
+	}
+	out, err := svc.ResolverIncidencia(ctx, v.Id, inc.Id,
+		operclient.ResolucionIncidenciaEntrada{Resolucion: "atendida"}, "coordinador")
+	if err != nil {
+		t.Fatalf("ResolverIncidencia (coordinador): %v", err)
+	}
+	if out.Estado != operclient.IncidenciaEstadoResuelta {
+		t.Errorf("estado tras resolver: got %q, want resuelta", out.Estado)
 	}
 }
