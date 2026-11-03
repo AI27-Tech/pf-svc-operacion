@@ -647,9 +647,10 @@ func (m *Module) Consultas() ConsultasAPI {
 // y leer el detalle para la composición de hitos (ADR 27).
 //
 // obtenerViaje devuelve ViajeDetalle (no Viaje): bff compone los hitos a partir
-// del detalle, que incluye las condiciones activas (E2-T2/E2-T3). La asignación
-// NO entra aquí: no es arista de bff (bff.md (f)). La transición SÍ: bff reenvía
-// transicionarViaje (portal E9-T7, panel E8-T14) y en core esa arista va en proceso.
+// del detalle, que incluye las condiciones activas (E2-T2/E2-T3). La transición
+// SÍ: bff reenvía transicionarViaje (portal E9-T7, panel E8-T14) y en core esa
+// arista va en proceso. Con bff como única puerta pública, también entra el flujo
+// interno del panel (ETA, asignación, bitácora, incidencias, estadías).
 //
 // SCAFFOLD: el servicio de dominio todavía no existe, así que los tres métodos
 // devuelven "no implementado" en runtime. La fachada fija la FORMA tipada con el
@@ -668,6 +669,16 @@ type ConsultasAPI interface {
 	// TransicionarViaje es la transición que bff reenvía (E9-T7/E8-T14); mismo caso de
 	// uso que POST /api/v1/viajes/{id}/transiciones (I3).
 	TransicionarViaje(ctx context.Context, id operclient.Id, body operclient.TransicionEntrada) (*operclient.Viaje, error)
+	// Flujo interno del panel que bff reenvía (bff como única puerta pública):
+	// mismos casos de uso que las rutas HTTP de Routes (I3).
+	FijarEta(ctx context.Context, id operclient.Id, body operclient.EtaEntrada) (*operclient.Viaje, error)
+	AsignarRecursos(ctx context.Context, id operclient.Id, body operclient.AsignacionEntrada) (*operclient.Asignacion, error)
+	RegistrarEntradaBitacora(ctx context.Context, id operclient.Id, body operclient.EntradaBitacoraEntrada) (*operclient.EntradaBitacora, error)
+	AbrirIncidencia(ctx context.Context, id operclient.Id, body operclient.IncidenciaEntrada) (*operclient.Incidencia, error)
+	ResolverIncidencia(ctx context.Context, id, iid operclient.Id, body operclient.ResolucionIncidenciaEntrada) (*operclient.Incidencia, error)
+	ListarEstadias(ctx context.Context, id operclient.Id, params operclient.ListarEstadiasParams) (*operclient.PaginaEstadias, error)
+	AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error)
+	CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error)
 }
 
 type consultas struct {
@@ -726,4 +737,65 @@ func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, bod
 		return nil, platformerrors.NewNoAutorizado("operacion: transicionarViaje sin claims en el contexto")
 	}
 	return c.m.viajes.Transicionar(ctx, id, body, claims.Rol, string(claims.Audiencia), claims.TenantID)
+}
+
+// FijarEta delega en el mismo caso de uso que handleFijarEta (I3). No usa actor.
+func (c *consultas) FijarEta(ctx context.Context, id operclient.Id, body operclient.EtaEntrada) (*operclient.Viaje, error) {
+	return c.m.viajes.FijarEta(ctx, id, body)
+}
+
+// AsignarRecursos delega en el mismo caso de uso que handleAsignar (I3). Sin
+// claims es error: el actor queda en la auditoría probatoria de la asignación.
+func (c *consultas) AsignarRecursos(ctx context.Context, id operclient.Id, body operclient.AsignacionEntrada) (*operclient.Asignacion, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: asignarRecursos sin claims en el contexto")
+	}
+	return c.m.asignacion.Asignar(ctx, id, body, claims.Subject)
+}
+
+// RegistrarEntradaBitacora delega en el mismo caso de uso que
+// handleRegistrarBitacora (I3). Sin claims es error: el autor de la entrada sale
+// del sujeto del token.
+func (c *consultas) RegistrarEntradaBitacora(ctx context.Context, id operclient.Id, body operclient.EntradaBitacoraEntrada) (*operclient.EntradaBitacora, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: registrarEntradaBitacora sin claims en el contexto")
+	}
+	return c.m.bitacora.RegistrarEntrada(ctx, id, body, claims.Subject)
+}
+
+// AbrirIncidencia delega en el mismo caso de uso que handleAbrirIncidencia (I3);
+// el rol del actor decide si puede abrirla.
+func (c *consultas) AbrirIncidencia(ctx context.Context, id operclient.Id, body operclient.IncidenciaEntrada) (*operclient.Incidencia, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: abrirIncidencia sin claims en el contexto")
+	}
+	return c.m.viajes.AbrirIncidencia(ctx, id, body, claims.Rol)
+}
+
+// ResolverIncidencia delega en el mismo caso de uso que handleResolverIncidencia
+// (I3); solo supervisor o administrador la resuelven.
+func (c *consultas) ResolverIncidencia(ctx context.Context, id, iid operclient.Id, body operclient.ResolucionIncidenciaEntrada) (*operclient.Incidencia, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: resolverIncidencia sin claims en el contexto")
+	}
+	return c.m.viajes.ResolverIncidencia(ctx, id, iid, body, claims.Rol)
+}
+
+// ListarEstadias delega en el mismo caso de uso que handleListarEstadias (I3).
+func (c *consultas) ListarEstadias(ctx context.Context, id operclient.Id, params operclient.ListarEstadiasParams) (*operclient.PaginaEstadias, error) {
+	return c.m.viajes.ListarEstadias(ctx, id, params)
+}
+
+// AbrirEstadia delega en el mismo caso de uso que handleAbrirEstadia (I3).
+func (c *consultas) AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error) {
+	return c.m.viajes.AbrirEstadia(ctx, id, body)
+}
+
+// CerrarEstadia delega en el mismo caso de uso que handleCerrarEstadia (I3).
+func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error) {
+	return c.m.viajes.CerrarEstadia(ctx, id, eid)
 }

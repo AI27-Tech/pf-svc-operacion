@@ -15,6 +15,25 @@
 **Archivos modificados:**
 - `internal/viajes/incidencia.go`
 - `internal/viajes/incidencia_integration_test.go`
+
+## 2026:11:02 17:54 — Flujo interno del panel en la fachada en proceso (bff como única puerta pública)
+
+**Para quién:** `pf-svc-core`, que cablea en proceso el puerto `OperacionPort` de bff. El Lead decidió que bff sea la única puerta pública; para que el panel interno deje de llamar las rutas nativas de operacion, bff necesita estas operaciones en la fachada. Para quien mantiene el servicio: cada método llama al mismo caso de uso que su ruta HTTP, así que no hay dos reglas que mantener.
+
+**Resumen:** `ConsultasAPI` gana `FijarEta`, `AsignarRecursos`, `RegistrarEntradaBitacora`, `AbrirIncidencia`, `ResolverIncidencia`, `ListarEstadias`, `AbrirEstadia` y `CerrarEstadia` (operationIds de `operacion.yaml`, DEC-105). Cada uno delega en el caso de uso de su handler (paridad I3). Las que usan actor (asignar: sujeto para la auditoría; bitácora: sujeto como autor; incidencias: rol) lo leen de los claims del ctx y sin claims devuelven `NoAutorizado`, como `CrearViaje`/`TransicionarViaje`. ETA y estadías no usan actor, igual que sus handlers.
+
+**Cambios:**
+- `operacion.go`: ocho métodos nuevos en `ConsultasAPI` y su implementación; el doc comment ya no dice que la asignación queda fuera de la fachada.
+- `consultas_test.go`: la réplica del puerto de bff incluye los ocho métodos.
+- `consultas_integration_test.go`: por familia (ETA, asignación, bitácora, incidencias, estadías), un camino feliz y un rechazo que da el mismo status por la fachada y por la ruta HTTP (404, 409, 400, 401, 404); asignación y bitácora sin claims dan `NoAutorizado`.
+
+**Sin cambio de contrato ni de HTTP:** los tipos ya existen en el pin `tracer.24`; las rutas HTTP no se tocaron.
+
+**Archivos modificados:**
+- `operacion.go`
+- `consultas_test.go`
+- `consultas_integration_test.go`
+
 - `CHANGELOG.md`
 
 ## 2026:11:02 16:54 — Transición de viaje en la fachada en proceso (E9-T7/E8-T14)
