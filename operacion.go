@@ -296,6 +296,35 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	// Flujo interno del panel (E8-T9/T10/T12/T13): roster para asignar la escolta.
 	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleCompletarFechaHora)))
+	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleListarIncidencias)))
+}
+
+// handleListarIncidencias atiende GET /api/v1/viajes/{id}/incidencias.
+func (m *Module) handleListarIncidencias(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var params operclient.ListarIncidenciasParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.incidencias(r.Context(), id, params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// incidencias aplica la guarda de audiencia y lee el histórico (I3).
+func (m *Module) incidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error) {
+	if err := exigirInterno(ctx, "listarIncidencias"); err != nil {
+		return nil, err
+	}
+	return m.viajes.ListarIncidencias(ctx, id, params)
 }
 
 // handleCompletarFechaHora atiende PATCH /api/v1/viajes/{id}/fecha-hora.
@@ -869,6 +898,9 @@ type ConsultasAPI interface {
 	// CompletarFechaHora fija fecha_hora_servicio antes de aprobar (E8-T9). Solo
 	// jefe_operativo y administrador (DEC-060 #1); 409 viaje_en_estado_terminal.
 	CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error)
+	// ListarIncidencias es el histórico de incidencias del viaje, abiertas y
+	// resueltas (E8-T13). Solo audiencia Interno; el Cliente recibe 404.
+	ListarIncidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error)
 }
 
 type consultas struct {
@@ -1029,4 +1061,9 @@ func (c *consultas) ListarUnidades(ctx context.Context, params operclient.Listar
 // CompletarFechaHora comparte la facultad y el caso de uso con handleCompletarFechaHora (I3).
 func (c *consultas) CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
 	return c.m.fechaHora(ctx, id, body)
+}
+
+// ListarIncidencias comparte la guarda y el caso de uso con handleListarIncidencias (I3).
+func (c *consultas) ListarIncidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error) {
+	return c.m.incidencias(ctx, id, params)
 }

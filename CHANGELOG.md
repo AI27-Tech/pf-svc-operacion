@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026-11-04 16:44 — Histórico de incidencias del viaje: `listarIncidencias` (E8-T13, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el histórico del panel (E8-T13, DEC-105). El panel solo veía las incidencias abiertas (en `obtenerViaje`); ahora lee el histórico completo.
+
+**Resumen:** monta `listarIncidencias` (`GET /api/v1/viajes/{id}/incidencias`) y lo agrega a `ConsultasAPI`. Devuelve `PaginaIncidencias`: abiertas (`en_atencion`) y resueltas (`resuelta`, con `resuelta_en`), ordenadas por apertura, 50 por página con cursor keyset sobre `(abierta_en, id)`.
+
+**Comportamiento:**
+- Solo audiencia Interno, cualquier rol interno; el Cliente recibe 404 (DEC-132, como `obtenerAsignacion`); sin claims, 401. Sin acotar por tenant (DEC-129).
+- El estado se deriva de `cerrada_en`, igual que al abrir y resolver.
+- Un viaje sin incidencias, o inexistente, da página vacía (como `listarEstadias`).
+- Cursor ilegible: 400.
+
+**Cambios:**
+- `internal/viajes/incidencia.go`: `ListarIncidencias` sobre `viajes.condicion_viaje` (`tipo = 'INCIDENCIA'`), con el pool de `op_viajes`.
+- `facultades.go`: `exigirInterno`, la guarda de lectura interna.
+- `operacion.go`: ruta, `handleListarIncidencias`, `Module.incidencias` y `consultas.ListarIncidencias`.
+- Pruebas: `TestConsultasListarIncidencias` (una resuelta y una abierta con su `tipo_interno` literal, por fachada y HTTP; Cliente 404). El avance del cursor se comprobó con una prueba desechable (página 2 trae solo la segunda incidencia); no se versiona porque exige más de 50 filas por la vía pública.
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/viajes/incidencia.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
 ## 2026-11-04 16:43 — Fecha/hora del servicio antes de aprobar: `completarFechaHora` (E8-T9, `tracer.37`)
 
 **Para quién:** el `bff`, `pf-svc-core` y el jefe operativo. Una solicitud de cliente sin fecha/hora no se podía aprobar desde el panel: la guarda `fecha_hora_servicio_definida` (DEC-010 #2) la exige y no había forma de escribirla.

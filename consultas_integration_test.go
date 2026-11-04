@@ -485,3 +485,55 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 	}
 	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+v.Id.String()+"/fecha-hora", `{"fecha_hora_servicio":"2026-11-20T15:30:00Z"}`, 409)
 }
+
+// TestConsultasListarIncidencias: el histórico trae la resuelta y la abierta, en
+// orden de apertura, igual por fachada y HTTP; el Cliente recibe 404 (DEC-132).
+func TestConsultasListarIncidencias(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxSup := auth.ContextWithClaims(ctx, claimsSupervisor)
+
+	id := viajeAprobado(t, ctx, api)
+	a, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
+	if err != nil {
+		t.Fatalf("abrir A: %v", err)
+	}
+	if _, err := api.ResolverIncidencia(ctxSup, id, a.Id, operclient.ResolucionIncidenciaEntrada{Resolucion: "reparada"}); err != nil {
+		t.Fatalf("resolver A: %v", err)
+	}
+	b, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "bloqueo_carretero"})
+	if err != nil {
+		t.Fatalf("abrir B: %v", err)
+	}
+
+	pag, err := api.ListarIncidencias(auth.ContextWithClaims(ctx, claimsJefe), id, operclient.ListarIncidenciasParams{})
+	if err != nil {
+		t.Fatalf("ListarIncidencias: %v", err)
+	}
+	if len(pag.Items) != 2 || pag.CursorSiguiente != nil {
+		t.Fatalf("página: got %d incidencias cursor %v, want 2 sin cursor", len(pag.Items), pag.CursorSiguiente)
+	}
+	r, ab := pag.Items[0], pag.Items[1]
+	if r.Id != a.Id || r.TipoInterno != "falla_mecanica" || r.Estado != operclient.IncidenciaEstadoResuelta || r.ResueltaEn == nil || r.ViajeId != id {
+		t.Errorf("resuelta: got %+v", r)
+	}
+	if ab.Id != b.Id || ab.TipoInterno != "bloqueo_carretero" || ab.Estado != operclient.IncidenciaEstadoEnAtencion || ab.ResueltaEn != nil {
+		t.Errorf("abierta: got %+v", ab)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/viajes/"+id.String()+"/incidencias", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"estado":"resuelta"`) || !strings.Contains(rec.Body.String(), `"estado":"en_atencion"`) {
+		t.Errorf("HTTP: status %d cuerpo %s; quiere 200 con resuelta y en_atencion", rec.Code, rec.Body)
+	}
+
+	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
+	if _, err := api.ListarIncidencias(auth.ContextWithClaims(ctx, cliente), id, operclient.ListarIncidenciasParams{}); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+}

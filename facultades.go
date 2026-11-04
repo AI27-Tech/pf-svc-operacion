@@ -32,3 +32,18 @@ func exigirFacultad(ctx context.Context, op string) error {
 	}
 	return nil
 }
+
+// exigirInterno es la guarda de las lecturas internas del viaje (histórico de
+// incidencias, ficha): sin claims 401; audiencia Cliente 404, como
+// obtenerAsignacion (DEC-132). No filtra por rol interno: DEC-060 reparte
+// facultades de escritura, no de lectura.
+func exigirInterno(ctx context.Context, op string) error {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return platformerrors.NewNoAutorizado("operacion: %s sin claims en el contexto", op)
+	}
+	if claims.Audiencia == auth.AudienciaCliente {
+		return platformerrors.NewNoEncontrado("operacion: viaje no encontrado")
+	}
+	return nil
+}
