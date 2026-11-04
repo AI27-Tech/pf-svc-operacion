@@ -340,3 +340,69 @@ func TestReasignarConflictoRevierteAsignacionOriginal(t *testing.T) {
 		t.Errorf("no debió emitirse viaje.reasignado tras el rollback, got %d", n)
 	}
 }
+
+// TestEscoltaDelViaje: obtenerAsignacion devuelve las unidades de la asignación
+// vigente con su tipo, vehículo y custodios del roster; un viaje sin asignación
+// devuelve unidades vacío (no nil, para que el JSON sea []), y tras reasignar
+// solo aparece la escolta nueva.
+func TestEscoltaDelViaje(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	dbtest.Exec(t, ctx, admin, "TRUNCATE roster.unidad_custodio, roster.unidad")
+
+	u1, u2, u3 := uuid.New(), uuid.New(), uuid.New()
+	v1, v2, v3 := uuid.New(), uuid.New(), uuid.New()
+	c1, c2, c3 := uuid.New(), uuid.New(), uuid.New()
+	for _, u := range []struct {
+		id, vehiculo uuid.UUID
+		tipo         string
+		custodios    []uuid.UUID
+	}{{u1, v1, "patrulla", []uuid.UUID{c1, c2}}, {u2, v2, "moto", []uuid.UUID{c3}}, {u3, v3, "moto", []uuid.UUID{c1}}} {
+		if _, err := admin.Exec(ctx, `INSERT INTO roster.unidad (id, tipo, vehiculo_id) VALUES ($1, $2, $3)`,
+			u.id, u.tipo, u.vehiculo.String()); err != nil {
+			t.Fatalf("sembrar unidad: %v", err)
+		}
+		for _, c := range u.custodios {
+			if _, err := admin.Exec(ctx, `INSERT INTO roster.unidad_custodio (unidad_id, custodio_id) VALUES ($1, $2)`,
+				u.id, c.String()); err != nil {
+				t.Fatalf("sembrar custodio: %v", err)
+			}
+		}
+	}
+
+	sinAsignar := sembrarViaje(t, ctx, "APROBADO", true)
+	e, err := svc.Escolta(ctx, sinAsignar)
+	if err != nil || e.Unidades == nil || len(e.Unidades) != 0 {
+		t.Fatalf("viaje sin asignación: %+v err %v; quiere unidades [] sin error", e, err)
+	}
+
+	viajeID := sembrarViaje(t, ctx, "APROBADO", true)
+	if _, err := svc.Asignar(ctx, viajeID, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u1, u2}}, "actor-1"); err != nil {
+		t.Fatalf("Asignar: %v", err)
+	}
+	e, err = svc.Escolta(ctx, viajeID)
+	if err != nil {
+		t.Fatalf("Escolta: %v", err)
+	}
+	if e.ViajeId != viajeID || len(e.Unidades) != 2 {
+		t.Fatalf("escolta: %+v; quiere 2 unidades del viaje %s", e, viajeID)
+	}
+	got := map[uuid.UUID]operclient.Unidad{e.Unidades[0].Id: e.Unidades[0], e.Unidades[1].Id: e.Unidades[1]}
+	p, m := got[u1], got[u2]
+	if p.Tipo == nil || *p.Tipo != operclient.Patrulla || p.VehiculoId != v1 || len(p.CustodiosIds) != 2 || !p.Activa {
+		t.Fatalf("unidad patrulla: %+v; quiere patrulla, vehículo %s, 2 custodios, activa", p, v1)
+	}
+	if m.Tipo == nil || *m.Tipo != operclient.Moto || m.VehiculoId != v2 || len(m.CustodiosIds) != 1 || m.CustodiosIds[0] != c3 {
+		t.Fatalf("unidad moto: %+v; quiere moto, vehículo %s, custodio %s", m, v2, c3)
+	}
+
+	if _, err := svc.Reasignar(ctx, viajeID, operclient.ReasignacionEntrada{UnidadesIds: []operclient.Id{u3}, Motivo: "cambio de patrulla"}, "actor-1"); err != nil {
+		t.Fatalf("Reasignar: %v", err)
+	}
+	e, err = svc.Escolta(ctx, viajeID)
+	if err != nil || len(e.Unidades) != 1 || e.Unidades[0].Id != u3 {
+		t.Fatalf("tras reasignar: %+v err %v; quiere solo la unidad %s", e, err, u3)
+	}
+}

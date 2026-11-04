@@ -345,3 +345,35 @@ func TestConsultasEstadias(t *testing.T) {
 	_, err = api.CerrarEstadia(ctxJefe, id, otra)
 	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+id.String()+"/estadias/"+otra.String(), `{}`, 404)
 }
+
+// TestConsultasObtenerAsignacion: un interno lee la escolta (vacía sin
+// asignación) igual por fachada y HTTP (200); el Cliente recibe 404 (DEC-132) y
+// sin claims es no autorizado.
+func TestConsultasObtenerAsignacion(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+
+	id := viajeAprobado(t, ctx, api)
+	e, err := api.ObtenerAsignacion(auth.ContextWithClaims(ctx, claimsJefe), id)
+	if err != nil || e.Unidades == nil || len(e.Unidades) != 0 {
+		t.Fatalf("interno sin asignación: %+v err %v; quiere unidades []", e, err)
+	}
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/viajes/"+id.String()+"/asignacion", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"unidades":[]`) {
+		t.Errorf("HTTP: status %d cuerpo %s; quiere 200 con unidades []", rec.Code, rec.Body)
+	}
+
+	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
+	if _, err := api.ObtenerAsignacion(auth.ContextWithClaims(ctx, cliente), id); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+	if _, err := api.ObtenerAsignacion(ctx, id); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
+		t.Errorf("sin claims: err %v, quiere no_autorizado", err)
+	}
+}
