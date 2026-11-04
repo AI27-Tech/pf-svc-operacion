@@ -305,3 +305,64 @@ func esViolacionExclusion(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23P01"
 }
+
+// Escolta devuelve las unidades de la asignación vigente del viaje, cada una con
+// su tipo, vehículo y custodios del roster (obtenerAsignacion). Sin asignación
+// vigente, unidades va vacío: no es error. Lo usa el bff para la escolta del
+// detalle de Reacción (DEC-121 #2).
+//
+// shortcut: una unidad reservada que no está en el roster se omite (Asignar no
+// verifica el roster todavía, ADR 31 "Pendiente real"); se vuelve error cuando
+// Asignar valide contra roster.unidad.
+func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*operclient.EscoltaVigente, error) {
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("operacion: abrir transacción de lectura de la escolta: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT u.id, u.tipo, u.vehiculo_id, u.activa,
+		        COALESCE(array_agg(c.custodio_id ORDER BY c.custodio_id)
+		                 FILTER (WHERE c.custodio_id IS NOT NULL), '{}')
+		   FROM asignacion.asignacion_viaje a
+		   JOIN asignacion.reserva_recurso r ON r.asignacion_id = a.id
+		   JOIN roster.unidad u ON u.id = r.unidad_id
+		   LEFT JOIN roster.unidad_custodio c ON c.unidad_id = u.id
+		  WHERE a.viaje_id = $1 AND a.liberada_en IS NULL
+		  GROUP BY u.id, u.tipo, u.vehiculo_id, u.activa
+		  ORDER BY u.id`,
+		viajeID)
+	if err != nil {
+		return nil, fmt.Errorf("operacion: leer la escolta del viaje: %w", err)
+	}
+	defer rows.Close()
+
+	unidades := []operclient.Unidad{}
+	for rows.Next() {
+		var u operclient.Unidad
+		var tipo, vehiculo string
+		var custodios []string
+		if err := rows.Scan(&u.Id, &tipo, &vehiculo, &u.Activa, &custodios); err != nil {
+			return nil, fmt.Errorf("operacion: escanear unidad de la escolta: %w", err)
+		}
+		t := operclient.UnidadTipo(tipo)
+		u.Tipo = &t
+		if u.VehiculoId, err = uuid.Parse(vehiculo); err != nil {
+			return nil, fmt.Errorf("operacion: vehiculo_id inválido en la unidad %s: %w", u.Id, err)
+		}
+		u.CustodiosIds = make([]operclient.Id, 0, len(custodios))
+		for _, c := range custodios {
+			id, err := uuid.Parse(c)
+			if err != nil {
+				return nil, fmt.Errorf("operacion: custodio_id inválido en la unidad %s: %w", u.Id, err)
+			}
+			u.CustodiosIds = append(u.CustodiosIds, id)
+		}
+		unidades = append(unidades, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("operacion: iterar la escolta: %w", err)
+	}
+	return &operclient.EscoltaVigente{ViajeId: viajeID, Unidades: unidades}, nil
+}
