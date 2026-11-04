@@ -33,6 +33,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/adjuntos"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
@@ -100,6 +101,7 @@ type Module struct {
 	viajes     *viajes.Servicio
 	asignacion *asignacion.Servicio
 	bitacora   *bitacora.Servicio
+	adjuntos   *adjuntos.Servicio
 	descargas  *descargas.Servicio
 	// auditoriaConsulta lee la bitácora probatoria para la composición del
 	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
@@ -140,6 +142,12 @@ func New(p Pools, d Deps) (*Module, error) {
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
 		bitacora:   bitacora.NewServicio(p.Bitacora),
+		// Evidencia del viaje (E6-T4): metadata con op_bitacora, rastro con
+		// op_auditoria (dos pools, un rol cada uno, I1). El almacén de objetos es
+		// un stub hasta ADR 32 (MinIO): firma URL de marcador, los bytes no pasan
+		// por el servicio. shortcut: URL de marcador, se reemplaza con el adaptador
+		// real cuando ADR 32 aterrice.
+		adjuntos: adjuntos.NewServicio(p.Bitacora, p.Auditoria, adjuntos.AlmacenStub{}),
 		// registrarDescargaViaje (AI27-80): lee el viaje con op_viajes y escribe el
 		// rastro de auditoría con el rol dueño op_auditoria vía el interceptor. Dos
 		// pools, uno por rol (I1); sin GRANT cruzado a op_viajes (ADR 31/33).
@@ -274,6 +282,12 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	// operacion para DEJAR el rastro de auditoría (el rastro lo escribe operacion
 	// en su transacción, no el bff). Sin cuerpo; responde el Viaje descargado.
 	mux.Handle("POST /api/v1/viajes/{id}/descargas", protegido(http.HandlerFunc(m.handleRegistrarDescarga)))
+	// Evidencia del viaje (E6-T4 / E6-HU-027): listar metadatos, crear la
+	// intención de subida (URL de vida corta) y autorizar la descarga. Los bytes
+	// no pasan por operacion; cada acceso queda auditado (E1-T7).
+	mux.Handle("GET /api/v1/viajes/{id}/adjuntos", protegido(http.HandlerFunc(m.handleListarAdjuntos)))
+	mux.Handle("POST /api/v1/viajes/{id}/adjuntos/intenciones-subida", protegido(http.HandlerFunc(m.handleCrearIntencionSubidaAdjunto)))
+	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(http.HandlerFunc(m.handleDescargarAdjunto)))
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -582,6 +596,75 @@ func (m *Module) handleRegistrarDescarga(w http.ResponseWriter, r *http.Request)
 	escribirJSON(w, http.StatusOK, v)
 }
 
+// handleListarAdjuntos atiende GET /api/v1/viajes/{id}/adjuntos: devuelve los
+// metadatos de la evidencia del viaje, sin bytes. No pagina en V1 (DT-08).
+func (m *Module) handleListarAdjuntos(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	pag, err := m.adjuntos.Listar(r.Context(), id)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// handleCrearIntencionSubidaAdjunto atiende POST
+// /api/v1/viajes/{id}/adjuntos/intenciones-subida: inserta la metadata del
+// adjunto (estado_escaneo 'pendiente'), audita el acceso y devuelve la URL de
+// subida de vida corta. Los bytes no pasan por operacion. 201.
+func (m *Module) handleCrearIntencionSubidaAdjunto(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.IntencionSubidaAdjuntoEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	intencion, err := m.adjuntos.CrearIntencionSubida(r.Context(), id, body, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, intencion)
+}
+
+// handleDescargarAdjunto atiende GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga:
+// autoriza la descarga de un adjunto existente, audita el acceso y devuelve la
+// URL de descarga de vida corta. Un adjunto inexistente da 404 antes de firmar.
+func (m *Module) handleDescargarAdjunto(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	aid, err := uuid.Parse(r.PathValue("aid"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de adjunto inválido"))
+		return
+	}
+	var actor string
+	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
+		actor = claims.Subject
+	}
+	descarga, err := m.adjuntos.Descargar(r.Context(), id, aid, actor)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, descarga)
+}
+
 // escribirJSON serializa v como respuesta JSON con el status dado.
 func escribirJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -679,6 +762,13 @@ type ConsultasAPI interface {
 	ListarEstadias(ctx context.Context, id operclient.Id, params operclient.ListarEstadiasParams) (*operclient.PaginaEstadias, error)
 	AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error)
 	CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error)
+	// Evidencia del viaje (E6-T4). bff las proxea por HTTP; core las cablea en
+	// proceso con paridad I3. Los bytes no pasan por operacion: subida y descarga
+	// usan la URL de vida corta del almacenamiento de objetos. El actor sale de
+	// los claims del ctx, igual que RegistrarDescargaViaje.
+	ListarAdjuntos(ctx context.Context, id operclient.Id) (*operclient.PaginaAdjuntos, error)
+	CrearIntencionSubidaAdjunto(ctx context.Context, id operclient.Id, body operclient.IntencionSubidaAdjuntoEntrada) (*operclient.IntencionSubidaAdjunto, error)
+	DescargarAdjunto(ctx context.Context, id, aid operclient.Id) (*operclient.DescargaAdjunto, error)
 }
 
 type consultas struct {
@@ -737,6 +827,31 @@ func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, bod
 		return nil, platformerrors.NewNoAutorizado("operacion: transicionarViaje sin claims en el contexto")
 	}
 	return c.m.viajes.Transicionar(ctx, id, body, claims.Rol, string(claims.Audiencia), claims.TenantID)
+}
+
+// ListarAdjuntos reenvía al mismo caso de uso que handleListarAdjuntos (I3).
+func (c *consultas) ListarAdjuntos(ctx context.Context, id operclient.Id) (*operclient.PaginaAdjuntos, error) {
+	return c.m.adjuntos.Listar(ctx, id)
+}
+
+// CrearIntencionSubidaAdjunto reenvía al caso de uso (I3). El actor sale de los
+// claims del ctx; nil-safe: sin claims el actor queda vacío (autor del rastro
+// NULL), no es error, igual que RegistrarDescargaViaje.
+func (c *consultas) CrearIntencionSubidaAdjunto(ctx context.Context, id operclient.Id, body operclient.IntencionSubidaAdjuntoEntrada) (*operclient.IntencionSubidaAdjunto, error) {
+	var actor string
+	if claims := auth.ClaimsFromContext(ctx); claims != nil {
+		actor = claims.Subject
+	}
+	return c.m.adjuntos.CrearIntencionSubida(ctx, id, body, actor)
+}
+
+// DescargarAdjunto reenvía al caso de uso (I3). El actor sale de los claims del ctx.
+func (c *consultas) DescargarAdjunto(ctx context.Context, id, aid operclient.Id) (*operclient.DescargaAdjunto, error) {
+	var actor string
+	if claims := auth.ClaimsFromContext(ctx); claims != nil {
+		actor = claims.Subject
+	}
+	return c.m.adjuntos.Descargar(ctx, id, aid, actor)
 }
 
 // FijarEta delega en el mismo caso de uso que handleFijarEta (I3). No usa actor.
