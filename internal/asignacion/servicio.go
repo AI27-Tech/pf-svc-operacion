@@ -19,6 +19,7 @@ import (
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/roster"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -322,9 +323,7 @@ func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*opercli
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx,
-		`SELECT u.id, u.tipo, u.vehiculo_id, u.activa,
-		        COALESCE(array_agg(c.custodio_id ORDER BY c.custodio_id)
-		                 FILTER (WHERE c.custodio_id IS NOT NULL), '{}')
+		`SELECT `+roster.Columnas+`
 		   FROM asignacion.asignacion_viaje a
 		   JOIN asignacion.reserva_recurso r ON r.asignacion_id = a.id
 		   JOIN roster.unidad u ON u.id = r.unidad_id
@@ -340,24 +339,9 @@ func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*opercli
 
 	unidades := []operclient.Unidad{}
 	for rows.Next() {
-		var u operclient.Unidad
-		var tipo, vehiculo string
-		var custodios []string
-		if err := rows.Scan(&u.Id, &tipo, &vehiculo, &u.Activa, &custodios); err != nil {
-			return nil, fmt.Errorf("operacion: escanear unidad de la escolta: %w", err)
-		}
-		t := operclient.UnidadTipo(tipo)
-		u.Tipo = &t
-		if u.VehiculoId, err = uuid.Parse(vehiculo); err != nil {
-			return nil, fmt.Errorf("operacion: vehiculo_id inválido en la unidad %s: %w", u.Id, err)
-		}
-		u.CustodiosIds = make([]operclient.Id, 0, len(custodios))
-		for _, c := range custodios {
-			id, err := uuid.Parse(c)
-			if err != nil {
-				return nil, fmt.Errorf("operacion: custodio_id inválido en la unidad %s: %w", u.Id, err)
-			}
-			u.CustodiosIds = append(u.CustodiosIds, id)
+		u, err := roster.Escanear(rows)
+		if err != nil {
+			return nil, err
 		}
 		unidades = append(unidades, u)
 	}
