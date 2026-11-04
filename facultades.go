@@ -19,6 +19,8 @@ var facultades = map[string][]roles.Rol{
 	// DEC-060 #1: el jefe_operativo aprueba, y completa la fecha/hora antes de
 	// aprobar (E1-T3, guarda fecha_hora_servicio_definida).
 	"completarFechaHora": {roles.RolJefeOperativo, roles.RolAdministrador},
+	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
+	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }
 
 // exigirFacultad rechaza sin claims (401) y con un rol fuera de facultades[op] (403).

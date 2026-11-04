@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 2026-11-04 16:47 — Ficha técnica del viaje: `obtenerFicha` / `guardarFicha` (E8-T12, DEC-104, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el monitorista. La ficha del panel (E8-T12) corría contra un mock porque `operacion` no guardaba tracto, contenedores ni GPS. Para quien mantiene el servicio: una migración nueva de columnas sobre `viajes.viaje`.
+
+**Resumen:** monta `obtenerFicha` (`GET /api/v1/viajes/{id}/ficha`) y `guardarFicha` (`PATCH`, mismo path) y los agrega a `ConsultasAPI`. Forma de DEC-104: `tracto` objeto `{placas, economico, marca, modelo, color}` o `null`, `contenedores` 0..N `{economico, placas, sello, color}`, `gps_ids`. Todo opcional. `tipo_servicio` no entra (es del viaje, solo lectura).
+
+**Comportamiento:**
+- Leer: solo audiencia Interno; el Cliente recibe 404 (DEC-132). Guardar: `monitorista`, `supervisor`, `coordinador` y `administrador` (DEC-060 #2); otro rol, 403. Sin claims, 401. Viaje inexistente, 404.
+- Guardado parcial: propiedad ausente no se toca; `contenedores`/`gps_ids` presentes reemplazan la lista y `[]` la borra; `"tracto": null` borra el tracto. Un contenedor sin datos se descarta; `gps_ids` repetidos se deduplican conservando el orden; un texto vacío o de solo espacios cuenta como ausente. Campo desconocido, 400.
+- En la fachada en proceso, `Tracto` nil no toca el tracto y `&Tracto{}` lo borra: el tipo generado no distingue `null` de ausente, así que quien recibe el JSON traduce `"tracto": null` a `&Tracto{}` (el handler HTTP de aquí ya lo hace).
+- Editable en cualquier estado: la ficha no gatea transiciones en V1 (DEC-104 #3). Los `gps_ids` no se validan contra `catalogos` (son referencias, DEC-104 #5).
+- Sin evento ni auditoría: el registro no declara evento, y `op_viajes` no tiene `GRANT` sobre `auditoria`.
+
+**Cambios:**
+- `migrations/viajes/0005_ficha_tecnica.sql` (nuevo): columnas `tracto_placas`, `tracto_economico`, `tracto_marca`, `tracto_modelo`, `tracto_color` (`TEXT`), `contenedores` (`JSONB`, default `[]`) y `gps_ids` (`UUID[]`, default `{}`) en `viajes.viaje`. Idempotente; sin `GRANT` (`op_viajes` ya tiene `SELECT/INSERT/UPDATE` sobre la tabla). La columna `tracto TEXT` de 0001, sin uso, se deja.
+- `internal/viajes/ficha.go` (nuevo): `ObtenerFicha`, `GuardarFicha` (un solo `UPDATE` con las columnas presentes) y `fichaDe`.
+- `facultades.go`: entrada `guardarFicha`.
+- `operacion.go`: rutas, `handleObtenerFicha`, `handleGuardarFicha` (rechaza campos desconocidos y detecta `"tracto": null`), `Module.ficha`, `Module.guardarFicha`, `consultas.ObtenerFicha` y `consultas.GuardarFicha`.
+- Pruebas: `TestConsultasFicha` (ficha vacía; guardado con contenedor vacío descartado y GPS deduplicados; `gps_ids: []` parcial; `"tracto": null` por HTTP; campo desconocido 400; jefe_operativo 403 por fachada y HTTP; Cliente 404; viaje inexistente 404).
+
+**Migración:** `migrations/viajes/0005_ficha_tecnica.sql`. La toma el embed `viajes/*.sql`; el aplicador de `pf-svc-core` (`cmd/migrate`) la corre en la fase 2 con el ejecutor del rol `op_viajes`.
+
+**Archivos modificados:**
+- `migrations/viajes/0005_ficha_tecnica.sql`, `internal/viajes/ficha.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
 ## 2026-11-04 16:44 — Histórico de incidencias del viaje: `listarIncidencias` (E8-T13, `tracer.37`)
 
 **Para quién:** el `bff`, `pf-svc-core` y el histórico del panel (E8-T13, DEC-105). El panel solo veía las incidencias abiertas (en `obtenerViaje`); ahora lee el histórico completo.

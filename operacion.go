@@ -21,8 +21,10 @@
 package operacion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -297,6 +299,75 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleCompletarFechaHora)))
 	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleListarIncidencias)))
+	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(http.HandlerFunc(m.handleObtenerFicha)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/ficha", protegido(http.HandlerFunc(m.handleGuardarFicha)))
+}
+
+// handleObtenerFicha atiende GET /api/v1/viajes/{id}/ficha.
+func (m *Module) handleObtenerFicha(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	f, err := m.ficha(r.Context(), id)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, f)
+}
+
+// handleGuardarFicha atiende PATCH /api/v1/viajes/{id}/ficha. Un campo
+// desconocido es 400 (additionalProperties: false). Como el tipo generado no
+// distingue `"tracto": null` de una propiedad ausente, el handler lo detecta en
+// el JSON crudo y lo pasa como &Tracto{} (borrar), según la regla de GuardarFicha.
+func (m *Module) handleGuardarFicha(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	var body operclient.FichaTecnicaEntrada
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	if body.Tracto == nil {
+		var props map[string]json.RawMessage
+		if json.Unmarshal(raw, &props) == nil && string(bytes.TrimSpace(props["tracto"])) == "null" {
+			body.Tracto = &operclient.Tracto{}
+		}
+	}
+	f, err := m.guardarFicha(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, f)
+}
+
+// ficha aplica la guarda de lectura interna y lee la ficha (I3).
+func (m *Module) ficha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error) {
+	if err := exigirInterno(ctx, "obtenerFicha"); err != nil {
+		return nil, err
+	}
+	return m.viajes.ObtenerFicha(ctx, id)
+}
+
+// guardarFicha aplica la facultad de guardarFicha y guarda (I3).
+func (m *Module) guardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error) {
+	if err := exigirFacultad(ctx, "guardarFicha"); err != nil {
+		return nil, err
+	}
+	return m.viajes.GuardarFicha(ctx, id, body)
 }
 
 // handleListarIncidencias atiende GET /api/v1/viajes/{id}/incidencias.
@@ -901,6 +972,14 @@ type ConsultasAPI interface {
 	// ListarIncidencias es el histórico de incidencias del viaje, abiertas y
 	// resueltas (E8-T13). Solo audiencia Interno; el Cliente recibe 404.
 	ListarIncidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error)
+	// ObtenerFicha y GuardarFicha leen y editan por partes la ficha técnica
+	// (E8-T12, DEC-104). Leer: solo audiencia Interno (Cliente 404). Guardar:
+	// monitorista, supervisor, coordinador y administrador (DEC-060 #2); otro
+	// rol, 403. En GuardarFicha, Tracto nil no toca el tracto y un Tracto sin
+	// ningún campo (&Tracto{}) lo borra: quien recibe el JSON traduce
+	// `"tracto": null` a &Tracto{} antes de llamar.
+	ObtenerFicha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error)
+	GuardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error)
 }
 
 type consultas struct {
@@ -1066,4 +1145,14 @@ func (c *consultas) CompletarFechaHora(ctx context.Context, id operclient.Id, bo
 // ListarIncidencias comparte la guarda y el caso de uso con handleListarIncidencias (I3).
 func (c *consultas) ListarIncidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error) {
 	return c.m.incidencias(ctx, id, params)
+}
+
+// ObtenerFicha comparte la guarda y el caso de uso con handleObtenerFicha (I3).
+func (c *consultas) ObtenerFicha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error) {
+	return c.m.ficha(ctx, id)
+}
+
+// GuardarFicha comparte la facultad y el caso de uso con handleGuardarFicha (I3).
+func (c *consultas) GuardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error) {
+	return c.m.guardarFicha(ctx, id, body)
 }

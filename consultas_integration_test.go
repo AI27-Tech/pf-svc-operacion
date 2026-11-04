@@ -22,12 +22,19 @@ import (
 var claimsJefe = &auth.Claims{Subject: "jefe-1", Rol: "jefe_operativo", Audiencia: auth.AudienciaInterno}
 
 // autenticadorJefe acepta cualquier token y devuelve claimsJefe, para montar la
-// ruta HTTP con el MISMO actor que la fachada y comparar ambos caminos.
+// ruta HTTP con el MISMO actor que la fachada y comparar ambos caminos. El token
+// "monitorista" devuelve claimsMonitorista, para las rutas que gatean por rol.
 type autenticadorJefe struct{}
 
-func (autenticadorJefe) VerifyToken(context.Context, string) (*auth.Claims, error) {
+func (autenticadorJefe) VerifyToken(_ context.Context, token string) (*auth.Claims, error) {
+	if token == "monitorista" {
+		return claimsMonitorista, nil
+	}
 	return claimsJefe, nil
 }
+
+// claimsMonitorista son los claims de un monitorista: edita la ficha (DEC-060 #2).
+var claimsMonitorista = &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
 
 // moduloConViajes aplica las migraciones de viajes (mismo setup que
 // internal/viajes) y construye el módulo como lo hace core, con el pool op_viajes.
@@ -535,5 +542,83 @@ func TestConsultasListarIncidencias(t *testing.T) {
 	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
 	if _, err := api.ListarIncidencias(auth.ContextWithClaims(ctx, cliente), id, operclient.ListarIncidenciasParams{}); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
 		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+}
+
+// TestConsultasFicha: la ficha nace vacía; el monitorista la guarda por partes
+// (contenedor vacío descartado, gps_ids deduplicados, propiedad ausente intacta)
+// y por HTTP borra el tracto con `"tracto": null`. El jefe_operativo recibe 403
+// igual por fachada y HTTP, un campo desconocido 400 y el Cliente 404 al leer.
+func TestConsultasFicha(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxMon := auth.ContextWithClaims(ctx, claimsMonitorista)
+	id := viajeAprobado(t, ctx, api)
+
+	f, err := api.ObtenerFicha(auth.ContextWithClaims(ctx, claimsJefe), id)
+	if err != nil {
+		t.Fatalf("ObtenerFicha: %v", err)
+	}
+	if f.ViajeId != id || f.Tracto != nil || len(*f.Contenedores) != 0 || len(*f.GpsIds) != 0 {
+		t.Fatalf("ficha vacía: got %+v", f)
+	}
+
+	g1 := uuid.MustParse("00000000-0000-0000-0000-0000000000d1")
+	g2 := uuid.MustParse("00000000-0000-0000-0000-0000000000d2")
+	s := func(v string) *string { return &v }
+	f, err = api.GuardarFicha(ctxMon, id, operclient.FichaTecnicaEntrada{
+		Tracto:       &operclient.Tracto{Placas: s("ABC-123"), Economico: s("E-7"), Marca: s(" ")},
+		Contenedores: &[]operclient.Contenedor{{Sello: s("S1")}, {}},
+		GpsIds:       &[]operclient.Id{g1, g1, g2},
+	})
+	if err != nil {
+		t.Fatalf("GuardarFicha: %v", err)
+	}
+	if f.Tracto == nil || *f.Tracto.Placas != "ABC-123" || *f.Tracto.Economico != "E-7" || f.Tracto.Marca != nil {
+		t.Errorf("tracto: got %+v", f.Tracto)
+	}
+	if c := *f.Contenedores; len(c) != 1 || *c[0].Sello != "S1" || c[0].Placas != nil {
+		t.Errorf("contenedores: got %+v", c)
+	}
+	if g := *f.GpsIds; len(g) != 2 || g[0] != g1 || g[1] != g2 {
+		t.Errorf("gps_ids: got %v, want [%s %s]", g, g1, g2)
+	}
+
+	// Solo gps_ids: [] borra la lista y no toca tracto ni contenedores.
+	f, err = api.GuardarFicha(ctxMon, id, operclient.FichaTecnicaEntrada{GpsIds: &[]operclient.Id{}})
+	if err != nil {
+		t.Fatalf("GuardarFicha parcial: %v", err)
+	}
+	if len(*f.GpsIds) != 0 || f.Tracto == nil || len(*f.Contenedores) != 1 {
+		t.Errorf("parcial: got tracto %+v contenedores %d gps %d", f.Tracto, len(*f.Contenedores), len(*f.GpsIds))
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	patch := func(token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/viajes/"+id.String()+"/ficha", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := patch("monitorista", `{"tracto": null}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"tracto":null`) ||
+		!strings.Contains(rec.Body.String(), `"sello":"S1"`) {
+		t.Errorf("HTTP tracto null: status %d cuerpo %s; quiere 200, tracto null y el contenedor intacto", rec.Code, rec.Body)
+	}
+	if rec := patch("monitorista", `{"tracto":{"vin":"X"}}`); rec.Code != 400 {
+		t.Errorf("HTTP campo desconocido: status %d, quiere 400 (body %s)", rec.Code, rec.Body)
+	}
+
+	_, err = api.GuardarFicha(auth.ContextWithClaims(ctx, claimsJefe), id, operclient.FichaTecnicaEntrada{})
+	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+id.String()+"/ficha", `{}`, 403)
+
+	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
+	if _, err := api.ObtenerFicha(auth.ContextWithClaims(ctx, cliente), id); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+	if _, err := api.GuardarFicha(ctxMon, uuid.New(), operclient.FichaTecnicaEntrada{GpsIds: &[]operclient.Id{}}); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("viaje inexistente: err %v, quiere no_encontrado", err)
 	}
 }
