@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## 2026-11-04 HORA — Escolta vigente del viaje: `obtenerAsignacion` (E8-T18, `tracer.37`)
+## 2026-11-04 15:11 — Escolta vigente del viaje: `obtenerAsignacion` (E8-T18, `tracer.37`)
 
 **Para quién:** el `bff` y `pf-svc-core`. El detalle de Reacción (`obtenerEmergencia`, DEC-121 #2) exige la escolta del viaje y `operacion` no tenía ninguna lectura de la asignación vigente; ahora la tiene por HTTP y en proceso.
 
