@@ -29,6 +29,7 @@ type puertoOperacionBFF interface {
 	ListarEstadias(ctx context.Context, id operclient.Id, params operclient.ListarEstadiasParams) (*operclient.PaginaEstadias, error)
 	AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error)
 	CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error)
+	ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error)
 }
 
 // TestConsultasSatisfaceElPuertoDeBFF comprueba, en tiempo de compilación, que

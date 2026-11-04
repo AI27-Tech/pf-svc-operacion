@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026-11-04 16:41 — Roster de unidades: `listarUnidades` (E8-T10, `tracer.37`)
+
+**Para quién:** el `bff` y `pf-svc-core`. La pantalla de asignar escolta (E8-T10) corría contra un mock porque `operacion` no leía el roster; ahora lo lee por HTTP y en proceso.
+
+**Resumen:** monta `listarUnidades` (`GET /api/v1/unidades`) y lo agrega a `ConsultasAPI`. Devuelve `PaginaUnidades`: cada unidad con `id`, `tipo`, `vehiculo_id`, `custodios_ids` (ordenados) y `activa`, activas e inactivas, ordenadas por `id`, 50 por página con cursor opaco. Sin aptitud (el contrato no la expone en V1).
+
+**Comportamiento:**
+- Solo `jefe_operativo` y `administrador` (DEC-060 #1). Otro rol interno o el cliente recibe 403; sin claims, 401. Sin acotar por tenant (DEC-129).
+- Cursor ilegible: 400.
+- La facultad vive en `facultades.go` (tabla por `operationId`), compartida por HTTP y en proceso (I3).
+
+**Cambios:**
+- `internal/roster/servicio.go` (nuevo): `Listar` con el pool de `op_roster`, dueño del esquema (I1). `Escanear` y `Columnas` son la única copia del mapeo fila → `Unidad`.
+- `internal/asignacion/servicio.go`: `Escolta` reusa `roster.Escanear` en lugar de su copia del mapeo. Sin cambio de comportamiento.
+- `facultades.go` (nuevo): `exigirFacultad` y la tabla `facultades`.
+- `operacion.go`: ruta, `handleListarUnidades`, `Module.unidades` y `consultas.ListarUnidades`.
+- Pruebas: `TestConsultasListarUnidades` (patrulla activa con dos custodios y moto inactiva con uno, por fachada y HTTP; monitorista 403; cursor ilegible 400 por ambos caminos).
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/roster/servicio.go`, `internal/asignacion/servicio.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
 ## 2026-11-04 15:11 — Escolta vigente del viaje: `obtenerAsignacion` (E8-T18, `tracer.37`)
 
 **Para quién:** el `bff` y `pf-svc-core`. El detalle de Reacción (`obtenerEmergencia`, DEC-121 #2) exige la escolta del viaje y `operacion` no tenía ninguna lectura de la asignación vigente; ahora la tiene por HTTP y en proceso.

@@ -41,6 +41,7 @@ import (
 	"github.com/AI27-Tech/pf-svc-operacion/internal/catalogoscache"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/descargas"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/roster"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -103,6 +104,7 @@ type Module struct {
 	bitacora   *bitacora.Servicio
 	adjuntos   *adjuntos.Servicio
 	descargas  *descargas.Servicio
+	roster     *roster.Servicio
 	// auditoriaConsulta lee la bitácora probatoria para la composición del
 	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
 	auditoriaConsulta *auditoria.ServicioConsulta
@@ -142,6 +144,8 @@ func New(p Pools, d Deps) (*Module, error) {
 		viajes:     viajes.NewServicio(p.Viajes, pub),
 		asignacion: asignacion.NewServicio(p.Asignacion, pub),
 		bitacora:   bitacora.NewServicio(p.Bitacora),
+		// Lectura del roster de unidades (listarUnidades) con su rol dueño op_roster.
+		roster: roster.NewServicio(p.Roster),
 		// Evidencia del viaje (E6-T4): metadata con op_bitacora, rastro con
 		// op_auditoria (dos pools, un rol cada uno, I1). El almacén de objetos es
 		// un stub hasta ADR 32 (MinIO): firma URL de marcador, los bytes no pasan
@@ -289,6 +293,31 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/viajes/{id}/adjuntos", protegido(http.HandlerFunc(m.handleListarAdjuntos)))
 	mux.Handle("POST /api/v1/viajes/{id}/adjuntos/intenciones-subida", protegido(http.HandlerFunc(m.handleCrearIntencionSubidaAdjunto)))
 	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(http.HandlerFunc(m.handleDescargarAdjunto)))
+	// Flujo interno del panel (E8-T9/T10/T12/T13): roster para asignar la escolta.
+	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
+}
+
+// handleListarUnidades atiende GET /api/v1/unidades: una página del roster.
+func (m *Module) handleListarUnidades(w http.ResponseWriter, r *http.Request) {
+	var params operclient.ListarUnidadesParams
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		cur := operclient.Cursor(c)
+		params.Cursor = &cur
+	}
+	pag, err := m.unidades(r.Context(), params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, pag)
+}
+
+// unidades aplica la facultad de listarUnidades y lee el roster (I3).
+func (m *Module) unidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error) {
+	if err := exigirFacultad(ctx, "listarUnidades"); err != nil {
+		return nil, err
+	}
+	return m.roster.Listar(ctx, params)
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -802,6 +831,9 @@ type ConsultasAPI interface {
 	// ObtenerAsignacion lee la escolta vigente del viaje para el detalle de
 	// Reacción (E8-T18). Solo audiencia Interno.
 	ObtenerAsignacion(ctx context.Context, id operclient.Id) (*operclient.EscoltaVigente, error)
+	// ListarUnidades lee una página del roster para asignar la escolta (E8-T10).
+	// Solo jefe_operativo y administrador (DEC-060 #1); otro rol, 403.
+	ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error)
 }
 
 type consultas struct {
@@ -952,4 +984,9 @@ func (c *consultas) AbrirEstadia(ctx context.Context, id operclient.Id, body ope
 // CerrarEstadia delega en el mismo caso de uso que handleCerrarEstadia (I3).
 func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error) {
 	return c.m.viajes.CerrarEstadia(ctx, id, eid)
+}
+
+// ListarUnidades comparte la facultad y el caso de uso con handleListarUnidades (I3).
+func (c *consultas) ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error) {
+	return c.m.unidades(ctx, params)
 }

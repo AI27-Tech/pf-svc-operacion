@@ -151,7 +151,8 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 	}
 	dbtest.Exec(t, ctx, admin,
 		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, "+
-			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora")
+			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora, "+
+			"roster.unidad_custodio, roster.unidad")
 	pool := func(rol, searchPath string) *platformpgx.Pool {
 		p, cerrarPool := dbtest.PoolAs(t, ctx, rol, searchPath)
 		t.Cleanup(cerrarPool)
@@ -161,6 +162,7 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 		Viajes:     pool("op_viajes", "viajes"),
 		Asignacion: pool("op_asignacion", "viajes"),
 		Bitacora:   pool("op_bitacora", ""),
+		Roster:     pool("op_roster", ""),
 	}, operacion.Deps{Verificador: autenticadorJefe{}})
 	if err != nil {
 		t.Fatalf("operacion.New: %v", err)
@@ -376,4 +378,65 @@ func TestConsultasObtenerAsignacion(t *testing.T) {
 	if _, err := api.ObtenerAsignacion(ctx, id); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
 		t.Errorf("sin claims: err %v, quiere no_autorizado", err)
 	}
+}
+
+// TestConsultasListarUnidades: el jefe_operativo lee el roster (activas e
+// inactivas, con tipo y custodios) igual por fachada y HTTP; un monitorista
+// recibe 403 (DEC-060 #1) y un cursor ilegible, 400.
+func TestConsultasListarUnidades(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+
+	patrulla := uuid.MustParse("00000000-0000-0000-0000-0000000000a1")
+	moto := uuid.MustParse("00000000-0000-0000-0000-0000000000a2")
+	veh1 := uuid.MustParse("00000000-0000-0000-0000-0000000000b1")
+	veh2 := uuid.MustParse("00000000-0000-0000-0000-0000000000b2")
+	cus1 := uuid.MustParse("00000000-0000-0000-0000-0000000000c1")
+	cus2 := uuid.MustParse("00000000-0000-0000-0000-0000000000c2")
+	cus3 := uuid.MustParse("00000000-0000-0000-0000-0000000000c3")
+	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa) VALUES
+		('`+patrulla.String()+`', 'patrulla', '`+veh1.String()+`', true),
+		('`+moto.String()+`', 'moto', '`+veh2.String()+`', false)`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad_custodio (unidad_id, custodio_id) VALUES
+		('`+patrulla.String()+`', '`+cus2.String()+`'),
+		('`+patrulla.String()+`', '`+cus1.String()+`'),
+		('`+moto.String()+`', '`+cus3.String()+`')`)
+
+	pag, err := api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{})
+	if err != nil {
+		t.Fatalf("ListarUnidades: %v", err)
+	}
+	if len(pag.Items) != 2 || pag.CursorSiguiente != nil {
+		t.Fatalf("página: got %d unidades cursor %v, want 2 sin cursor", len(pag.Items), pag.CursorSiguiente)
+	}
+	p, mo := pag.Items[0], pag.Items[1]
+	if p.Id != patrulla || *p.Tipo != operclient.Patrulla || p.VehiculoId != veh1 || !p.Activa ||
+		len(p.CustodiosIds) != 2 || p.CustodiosIds[0] != cus1 || p.CustodiosIds[1] != cus2 {
+		t.Errorf("patrulla: got %+v", p)
+	}
+	if mo.Id != moto || *mo.Tipo != operclient.Moto || mo.Activa || len(mo.CustodiosIds) != 1 || mo.CustodiosIds[0] != cus3 {
+		t.Errorf("moto: got %+v", mo)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/unidades", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"`+moto.String()+`"`) ||
+		!strings.Contains(rec.Body.String(), `"cursor_siguiente":null`) {
+		t.Errorf("HTTP: status %d cuerpo %s; quiere 200 con la moto y cursor null", rec.Code, rec.Body)
+	}
+
+	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+	if _, err := api.ListarUnidades(auth.ContextWithClaims(ctx, monitorista), operclient.ListarUnidadesParams{}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("monitorista: err %v, quiere 403", err)
+	}
+	malo := operclient.Cursor("%%%")
+	_, err = api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{Cursor: &malo})
+	mismoStatus(t, m, err, http.MethodGet, "/api/v1/unidades?cursor=%25%25%25", "", 400)
 }
