@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## 2026:11:04 — Evidencia del viaje: adjuntos con URL de vida corta (E6-T4 / E6-HU-027)
+
+**Para quién:** `pf-svc-core` y el `bff`, que ya reenvían las tres operaciones de adjuntos pero no tenían servicio detrás. Esto desbloquea que la evidencia del viaje responda de extremo a extremo. Para quien mantiene el servicio: un módulo nuevo `internal/adjuntos`, con la metadata en `bitacora` y los bytes fuera del servicio.
+
+**Resumen:** monta las tres operaciones de `operacion.yaml`: `listarAdjuntos` (GET /api/v1/viajes/{id}/adjuntos), `crearIntencionSubidaAdjunto` (POST .../adjuntos/intenciones-subida, 201) y `descargarAdjunto` (GET .../adjuntos/{aid}/descarga). Los BYTES no pasan por el servicio: la subida y la descarga usan una URL de vida corta que firma el puerto `AlmacenObjetos`. La metadata vive en `bitacora.adjunto` (rol `op_bitacora`); cada acceso deja su rastro de auditoría en la tx del rol `op_auditoria` vía el interceptor (P3, E1-T7). Se añaden a `ConsultasAPI` para que `core` las cablee en proceso con paridad I3.
+
+**Sube el pin de contrato** de `tracer.24` a `tracer.36`. El salto no provocó renombres de enum; `go build` limpio.
+
+**Tres atajos documentados, cada uno con su deuda:**
+- **Almacén de objetos: stub (DT-14).** El único adaptador de `AlmacenObjetos` es `AlmacenStub`: firma una URL de marcador, no habla con ningún almacenamiento. El adaptador real (MinIO) espera ADR 32. La metadata, la auditoría y el contrato quedan completos.
+- **Escaneo antivirus: inerte (DT-13).** `estado_escaneo` nace `pendiente` (lo que dice el contrato) y nada lo mueve; no existe escáner. La descarga NO se bloquea por escaneo (una guarda sin escáner bloquearía todo). El grant de `op_bitacora` es SELECT+INSERT, sin UPDATE: no hay transición de estado posible. Pendiente de Seguridad (brief E8-T17).
+- **Alcance por unidad/tenant: por rol (DT-07).** El caso de uso no verifica alcance fino; la autorización es la audiencia Interna del middleware más el filtro por rol de monitoreo que aplica el `bff`. Mismo shortcut que el resto de `operacion`.
+
+**Cambios:**
+- `internal/adjuntos/servicio.go` (nuevo): casos de uso Listar, CrearIntencionSubida (inserta metadata `pendiente` + audita + firma URL), Descargar (lee + 404 + audita + firma URL).
+- `internal/adjuntos/almacen.go` (nuevo): puerto `AlmacenObjetos` y `AlmacenStub`.
+- `migrations/bitacora/0004_adjunto.sql` (nuevo): tabla `bitacora.adjunto` con CHECK de `estado_escaneo` y grant acotado SELECT+INSERT para `op_bitacora`.
+- `operacion.go`: tres handlers, tres rutas, el campo y el cableado en `New`, y los tres métodos en `ConsultasAPI` + `consultas`.
+- `go.mod`/`go.sum`: pin a `tracer.36`.
+- Pruebas: `internal/adjuntos/almacen_test.go` (stub, sin Postgres) y `servicio_integration_test.go` (metadata `pendiente`, validación, descarga, 404 por categoría `NoEncontrado`, y que `op_bitacora` no puede UPDATE/DELETE el adjunto). Verifiqué que el test del 404 detecta la regresión: mutar el 404 a un error genérico lo rompe.
+
+**Verificación:** `gofmt` limpio, `go build/vet ./...`, `go build ./cmd/api`, `go test ./...` con `OPERACION_TEST_DB` contra Postgres local (todos los paquetes), `arch-test` (v0.1.1) OK. El puerto stub no añadió aristas salientes.
+
+**Siguiente (fuera de este PR):** `pf-svc-core` sube el pin del `bff` a v0.1.14 y de `operacion`, y cablea el adaptador en proceso de los tres métodos; el almacén real y el escaneo son DT-14 y DT-13.
+
+**Archivos modificados:**
+- `operacion.go`, `go.mod`, `go.sum`
+- `internal/adjuntos/servicio.go`, `internal/adjuntos/almacen.go`
+- `internal/adjuntos/almacen_test.go`, `internal/adjuntos/servicio_integration_test.go`
+- `migrations/bitacora/0004_adjunto.sql`
+- `CHANGELOG.md`
+
 ## 2026:11:02 19:21 — Roles de incidencia alineados con DEC-060 (monitorista y coordinador)
 
 **Para quién:** el monitorista, que en la demo no podía abrir una incidencia (401 "el rol monitorista no puede abrir una incidencia", medido en el smoke del flujo interno sobre core), y el coordinador, que no podía abrir ni resolver. Para quien mantiene el servicio: era el único lugar que seguía usando el rol retirado `operador` (previo a DEC-045).
