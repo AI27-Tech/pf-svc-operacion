@@ -22,12 +22,19 @@ import (
 var claimsJefe = &auth.Claims{Subject: "jefe-1", Rol: "jefe_operativo", Audiencia: auth.AudienciaInterno}
 
 // autenticadorJefe acepta cualquier token y devuelve claimsJefe, para montar la
-// ruta HTTP con el MISMO actor que la fachada y comparar ambos caminos.
+// ruta HTTP con el MISMO actor que la fachada y comparar ambos caminos. El token
+// "monitorista" devuelve claimsMonitorista, para las rutas que gatean por rol.
 type autenticadorJefe struct{}
 
-func (autenticadorJefe) VerifyToken(context.Context, string) (*auth.Claims, error) {
+func (autenticadorJefe) VerifyToken(_ context.Context, token string) (*auth.Claims, error) {
+	if token == "monitorista" {
+		return claimsMonitorista, nil
+	}
 	return claimsJefe, nil
 }
+
+// claimsMonitorista son los claims de un monitorista: edita la ficha (DEC-060 #2).
+var claimsMonitorista = &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
 
 // moduloConViajes aplica las migraciones de viajes (mismo setup que
 // internal/viajes) y construye el módulo como lo hace core, con el pool op_viajes.
@@ -151,7 +158,8 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 	}
 	dbtest.Exec(t, ctx, admin,
 		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, "+
-			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora")
+			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora, "+
+			"roster.unidad_custodio, roster.unidad")
 	pool := func(rol, searchPath string) *platformpgx.Pool {
 		p, cerrarPool := dbtest.PoolAs(t, ctx, rol, searchPath)
 		t.Cleanup(cerrarPool)
@@ -161,6 +169,7 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 		Viajes:     pool("op_viajes", "viajes"),
 		Asignacion: pool("op_asignacion", "viajes"),
 		Bitacora:   pool("op_bitacora", ""),
+		Roster:     pool("op_roster", ""),
 	}, operacion.Deps{Verificador: autenticadorJefe{}})
 	if err != nil {
 		t.Fatalf("operacion.New: %v", err)
@@ -375,5 +384,241 @@ func TestConsultasObtenerAsignacion(t *testing.T) {
 	}
 	if _, err := api.ObtenerAsignacion(ctx, id); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
 		t.Errorf("sin claims: err %v, quiere no_autorizado", err)
+	}
+}
+
+// TestConsultasListarUnidades: el jefe_operativo lee el roster (activas e
+// inactivas, con tipo y custodios) igual por fachada y HTTP; un monitorista
+// recibe 403 (DEC-060 #1) y un cursor ilegible, 400.
+func TestConsultasListarUnidades(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+
+	patrulla := uuid.MustParse("00000000-0000-0000-0000-0000000000a1")
+	moto := uuid.MustParse("00000000-0000-0000-0000-0000000000a2")
+	veh1 := uuid.MustParse("00000000-0000-0000-0000-0000000000b1")
+	veh2 := uuid.MustParse("00000000-0000-0000-0000-0000000000b2")
+	cus1 := uuid.MustParse("00000000-0000-0000-0000-0000000000c1")
+	cus2 := uuid.MustParse("00000000-0000-0000-0000-0000000000c2")
+	cus3 := uuid.MustParse("00000000-0000-0000-0000-0000000000c3")
+	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa) VALUES
+		('`+patrulla.String()+`', 'patrulla', '`+veh1.String()+`', true),
+		('`+moto.String()+`', 'moto', '`+veh2.String()+`', false)`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad_custodio (unidad_id, custodio_id) VALUES
+		('`+patrulla.String()+`', '`+cus2.String()+`'),
+		('`+patrulla.String()+`', '`+cus1.String()+`'),
+		('`+moto.String()+`', '`+cus3.String()+`')`)
+
+	pag, err := api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{})
+	if err != nil {
+		t.Fatalf("ListarUnidades: %v", err)
+	}
+	if len(pag.Items) != 2 || pag.CursorSiguiente != nil {
+		t.Fatalf("página: got %d unidades cursor %v, want 2 sin cursor", len(pag.Items), pag.CursorSiguiente)
+	}
+	p, mo := pag.Items[0], pag.Items[1]
+	if p.Id != patrulla || *p.Tipo != operclient.Patrulla || p.VehiculoId != veh1 || !p.Activa ||
+		len(p.CustodiosIds) != 2 || p.CustodiosIds[0] != cus1 || p.CustodiosIds[1] != cus2 {
+		t.Errorf("patrulla: got %+v", p)
+	}
+	if mo.Id != moto || *mo.Tipo != operclient.Moto || mo.Activa || len(mo.CustodiosIds) != 1 || mo.CustodiosIds[0] != cus3 {
+		t.Errorf("moto: got %+v", mo)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/unidades", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"`+moto.String()+`"`) ||
+		!strings.Contains(rec.Body.String(), `"cursor_siguiente":null`) {
+		t.Errorf("HTTP: status %d cuerpo %s; quiere 200 con la moto y cursor null", rec.Code, rec.Body)
+	}
+
+	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+	if _, err := api.ListarUnidades(auth.ContextWithClaims(ctx, monitorista), operclient.ListarUnidadesParams{}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("monitorista: err %v, quiere 403", err)
+	}
+	malo := operclient.Cursor("%%%")
+	_, err = api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{Cursor: &malo})
+	mismoStatus(t, m, err, http.MethodGet, "/api/v1/unidades?cursor=%25%25%25", "", 400)
+}
+
+// TestConsultasCompletarFechaHora: una solicitud sin fecha/hora no se aprueba;
+// el jefe_operativo la completa y entonces sí. Un monitorista recibe 403 y un
+// viaje terminal 409 viaje_en_estado_terminal, igual por fachada y HTTP.
+func TestConsultasCompletarFechaHora(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
+
+	ctxCliente := auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: uuid.NewString()})
+	v, err := api.CrearViaje(ctxCliente, operclient.CrearViajeEntrada{Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}})
+	if err != nil {
+		t.Fatalf("crear viaje: %v", err)
+	}
+	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err == nil {
+		t.Fatal("aprobar sin fecha/hora debió fallar")
+	}
+
+	fecha := time.Date(2026, 11, 20, 15, 30, 0, 0, time.UTC)
+	out, err := api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	if err != nil {
+		t.Fatalf("CompletarFechaHora: %v", err)
+	}
+	if out.Id != v.Id || out.Estado != operclient.SOLICITADO || out.FechaHoraServicio == nil || !out.FechaHoraServicio.Equal(fecha) {
+		t.Errorf("viaje: got id %s estado %q fecha %v, want %s SOLICITADO %v", out.Id, out.Estado, out.FechaHoraServicio, v.Id, fecha)
+	}
+	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err != nil {
+		t.Fatalf("aprobar con fecha/hora: %v", err)
+	}
+
+	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+	if _, err := api.CompletarFechaHora(auth.ContextWithClaims(ctx, monitorista), v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("monitorista: err %v, quiere 403", err)
+	}
+
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id='"+v.Id.String()+"'")
+	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	if got := platformerrors.CodigoDe(err); got != "viaje_en_estado_terminal" {
+		t.Errorf("terminal: codigo %q (err %v), want viaje_en_estado_terminal", got, err)
+	}
+	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+v.Id.String()+"/fecha-hora", `{"fecha_hora_servicio":"2026-11-20T15:30:00Z"}`, 409)
+}
+
+// TestConsultasListarIncidencias: el histórico trae la resuelta y la abierta, en
+// orden de apertura, igual por fachada y HTTP; el Cliente recibe 404 (DEC-132).
+func TestConsultasListarIncidencias(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxSup := auth.ContextWithClaims(ctx, claimsSupervisor)
+
+	id := viajeAprobado(t, ctx, api)
+	a, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
+	if err != nil {
+		t.Fatalf("abrir A: %v", err)
+	}
+	if _, err := api.ResolverIncidencia(ctxSup, id, a.Id, operclient.ResolucionIncidenciaEntrada{Resolucion: "reparada"}); err != nil {
+		t.Fatalf("resolver A: %v", err)
+	}
+	b, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "bloqueo_carretero"})
+	if err != nil {
+		t.Fatalf("abrir B: %v", err)
+	}
+
+	pag, err := api.ListarIncidencias(auth.ContextWithClaims(ctx, claimsJefe), id, operclient.ListarIncidenciasParams{})
+	if err != nil {
+		t.Fatalf("ListarIncidencias: %v", err)
+	}
+	if len(pag.Items) != 2 || pag.CursorSiguiente != nil {
+		t.Fatalf("página: got %d incidencias cursor %v, want 2 sin cursor", len(pag.Items), pag.CursorSiguiente)
+	}
+	r, ab := pag.Items[0], pag.Items[1]
+	if r.Id != a.Id || r.TipoInterno != "falla_mecanica" || r.Estado != operclient.IncidenciaEstadoResuelta || r.ResueltaEn == nil || r.ViajeId != id {
+		t.Errorf("resuelta: got %+v", r)
+	}
+	if ab.Id != b.Id || ab.TipoInterno != "bloqueo_carretero" || ab.Estado != operclient.IncidenciaEstadoEnAtencion || ab.ResueltaEn != nil {
+		t.Errorf("abierta: got %+v", ab)
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/viajes/"+id.String()+"/incidencias", nil)
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"estado":"resuelta"`) || !strings.Contains(rec.Body.String(), `"estado":"en_atencion"`) {
+		t.Errorf("HTTP: status %d cuerpo %s; quiere 200 con resuelta y en_atencion", rec.Code, rec.Body)
+	}
+
+	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
+	if _, err := api.ListarIncidencias(auth.ContextWithClaims(ctx, cliente), id, operclient.ListarIncidenciasParams{}); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+}
+
+// TestConsultasFicha: la ficha nace vacía; el monitorista la guarda por partes
+// (contenedor vacío descartado, gps_ids deduplicados, propiedad ausente intacta)
+// y por HTTP borra el tracto con `"tracto": null`. El jefe_operativo recibe 403
+// igual por fachada y HTTP, un campo desconocido 400 y el Cliente 404 al leer.
+func TestConsultasFicha(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxMon := auth.ContextWithClaims(ctx, claimsMonitorista)
+	id := viajeAprobado(t, ctx, api)
+
+	f, err := api.ObtenerFicha(auth.ContextWithClaims(ctx, claimsJefe), id)
+	if err != nil {
+		t.Fatalf("ObtenerFicha: %v", err)
+	}
+	if f.ViajeId != id || f.Tracto != nil || len(*f.Contenedores) != 0 || len(*f.GpsIds) != 0 {
+		t.Fatalf("ficha vacía: got %+v", f)
+	}
+
+	g1 := uuid.MustParse("00000000-0000-0000-0000-0000000000d1")
+	g2 := uuid.MustParse("00000000-0000-0000-0000-0000000000d2")
+	s := func(v string) *string { return &v }
+	f, err = api.GuardarFicha(ctxMon, id, operclient.FichaTecnicaEntrada{
+		Tracto:       &operclient.Tracto{Placas: s("ABC-123"), Economico: s("E-7"), Marca: s(" ")},
+		Contenedores: &[]operclient.Contenedor{{Sello: s("S1")}, {}},
+		GpsIds:       &[]operclient.Id{g1, g1, g2},
+	})
+	if err != nil {
+		t.Fatalf("GuardarFicha: %v", err)
+	}
+	if f.Tracto == nil || *f.Tracto.Placas != "ABC-123" || *f.Tracto.Economico != "E-7" || f.Tracto.Marca != nil {
+		t.Errorf("tracto: got %+v", f.Tracto)
+	}
+	if c := *f.Contenedores; len(c) != 1 || *c[0].Sello != "S1" || c[0].Placas != nil {
+		t.Errorf("contenedores: got %+v", c)
+	}
+	if g := *f.GpsIds; len(g) != 2 || g[0] != g1 || g[1] != g2 {
+		t.Errorf("gps_ids: got %v, want [%s %s]", g, g1, g2)
+	}
+
+	// Solo gps_ids: [] borra la lista y no toca tracto ni contenedores.
+	f, err = api.GuardarFicha(ctxMon, id, operclient.FichaTecnicaEntrada{GpsIds: &[]operclient.Id{}})
+	if err != nil {
+		t.Fatalf("GuardarFicha parcial: %v", err)
+	}
+	if len(*f.GpsIds) != 0 || f.Tracto == nil || len(*f.Contenedores) != 1 {
+		t.Errorf("parcial: got tracto %+v contenedores %d gps %d", f.Tracto, len(*f.Contenedores), len(*f.GpsIds))
+	}
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	patch := func(token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/viajes/"+id.String()+"/ficha", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := patch("monitorista", `{"tracto": null}`); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"tracto":null`) ||
+		!strings.Contains(rec.Body.String(), `"sello":"S1"`) {
+		t.Errorf("HTTP tracto null: status %d cuerpo %s; quiere 200, tracto null y el contenedor intacto", rec.Code, rec.Body)
+	}
+	if rec := patch("monitorista", `{"tracto":{"vin":"X"}}`); rec.Code != 400 {
+		t.Errorf("HTTP campo desconocido: status %d, quiere 400 (body %s)", rec.Code, rec.Body)
+	}
+
+	_, err = api.GuardarFicha(auth.ContextWithClaims(ctx, claimsJefe), id, operclient.FichaTecnicaEntrada{})
+	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+id.String()+"/ficha", `{}`, 403)
+
+	cliente := &auth.Claims{Subject: "cli-1", TenantID: uuid.NewString(), Rol: "cliente", Audiencia: auth.AudienciaCliente}
+	if _, err := api.ObtenerFicha(auth.ContextWithClaims(ctx, cliente), id); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente: err %v, quiere no_encontrado", err)
+	}
+	if _, err := api.GuardarFicha(ctxMon, uuid.New(), operclient.FichaTecnicaEntrada{GpsIds: &[]operclient.Id{}}); platformerrors.AsCategory(err) != platformerrors.CategoryNoEncontrado {
+		t.Errorf("viaje inexistente: err %v, quiere no_encontrado", err)
 	}
 }

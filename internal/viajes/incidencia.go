@@ -208,6 +208,83 @@ func (s *Servicio) ResolverIncidencia(ctx context.Context, viajeID, incidenciaID
 	}, nil
 }
 
+// ListarIncidencias devuelve el histórico de incidencias del viaje, abiertas y
+// resueltas, ordenado por apertura (listarIncidencias, E8-T13 / DEC-105). El
+// estado se deriva de cerrada_en (NULL ⇒ en_atencion), igual que al abrir y
+// resolver. Paginación keyset sobre (abierta_en, id). Un viaje sin incidencias
+// (o inexistente) da una página vacía, como listarEstadias.
+func (s *Servicio) ListarIncidencias(ctx context.Context, viajeID operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error) {
+	var (
+		cAbierta *time.Time
+		cID      *uuid.UUID
+	)
+	if params.Cursor != nil && *params.Cursor != "" {
+		t, id, err := decodeCursor(*params.Cursor)
+		if err != nil {
+			return nil, platformerrors.NewValidacion("operacion: cursor inválido")
+		}
+		cAbierta, cID = &t, &id
+	}
+
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT id, tipo_interno, abierta_en, cerrada_en FROM viajes.condicion_viaje
+		  WHERE viaje_id = $1 AND tipo = 'INCIDENCIA'
+		    AND ($2::timestamptz IS NULL OR (abierta_en, id) > ($2, $3::uuid))
+		  ORDER BY abierta_en, id
+		  LIMIT $4`,
+		viajeID, cAbierta, cID, paginaMax+1) // +1 para saber si hay página siguiente
+	if err != nil {
+		return nil, fmt.Errorf("operacion: listar incidencias: %w", err)
+	}
+	defer rows.Close()
+
+	items := []operclient.Incidencia{}
+	for rows.Next() {
+		var (
+			id          uuid.UUID
+			tipoInterno *string
+			abierta     time.Time
+			cerrada     *time.Time
+		)
+		if err := rows.Scan(&id, &tipoInterno, &abierta, &cerrada); err != nil {
+			return nil, fmt.Errorf("operacion: escanear incidencia: %w", err)
+		}
+		inc := operclient.Incidencia{
+			Id:        id,
+			ViajeId:   viajeID,
+			Estado:    operclient.IncidenciaEstadoEnAtencion,
+			AbiertaEn: abierta.UTC(),
+		}
+		if tipoInterno != nil {
+			inc.TipoInterno = *tipoInterno
+		}
+		if cerrada != nil {
+			c := cerrada.UTC()
+			inc.Estado = operclient.IncidenciaEstadoResuelta
+			inc.ResueltaEn = &c
+		}
+		items = append(items, inc)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("operacion: iterar incidencias: %w", err)
+	}
+
+	var cursorSig *string
+	if len(items) > paginaMax {
+		items = items[:paginaMax]
+		last := items[paginaMax-1]
+		cur := encodeCursor(last.AbiertaEn, last.Id)
+		cursorSig = &cur
+	}
+	return &operclient.PaginaIncidencias{Items: items, CursorSiguiente: cursorSig}, nil
+}
+
 // esViolacionUnicidad detecta la violación de una restricción de unicidad
 // (SQLSTATE 23505): aquí, el índice único parcial que impide dos condiciones
 // abiertas del mismo tipo en un viaje.
