@@ -8,7 +8,7 @@ go 1.27
 // (00 reglas 1 y 7).
 require (
 	github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go v0.1.0-tracer.37
-	github.com/AI27-Tech/pf-pkg-platform-go v0.1.8
+	github.com/AI27-Tech/pf-pkg-platform-go v0.1.9
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 )
