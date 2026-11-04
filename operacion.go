@@ -265,6 +265,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	}
 	protegido := auth.Middleware(m.deps.Verificador, rev)
 	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
+	mux.Handle("GET /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleObtenerAsignacion)))
 	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
@@ -320,6 +321,35 @@ func (m *Module) handleTransicionar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	escribirJSON(w, http.StatusOK, v)
+}
+
+// handleObtenerAsignacion atiende GET /api/v1/viajes/{id}/asignacion: la escolta
+// vigente del viaje. Solo audiencia Interno; el Cliente recibe 404 (DEC-132).
+func (m *Module) handleObtenerAsignacion(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	e, err := m.escolta(r.Context(), id)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, e)
+}
+
+// escolta aplica la guarda de audiencia y lee la escolta. Es la única copia de la
+// regla para HTTP y en proceso (I3).
+func (m *Module) escolta(ctx context.Context, id operclient.Id) (*operclient.EscoltaVigente, error) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil, platformerrors.NewNoAutorizado("operacion: obtenerAsignacion sin claims")
+	}
+	if claims.Audiencia == auth.AudienciaCliente {
+		return nil, platformerrors.NewNoEncontrado("operacion: viaje no encontrado")
+	}
+	return m.asignacion.Escolta(ctx, id)
 }
 
 // handleAsignar atiende POST /api/v1/viajes/{id}/asignacion: lee las unidades de
@@ -769,6 +799,9 @@ type ConsultasAPI interface {
 	ListarAdjuntos(ctx context.Context, id operclient.Id) (*operclient.PaginaAdjuntos, error)
 	CrearIntencionSubidaAdjunto(ctx context.Context, id operclient.Id, body operclient.IntencionSubidaAdjuntoEntrada) (*operclient.IntencionSubidaAdjunto, error)
 	DescargarAdjunto(ctx context.Context, id, aid operclient.Id) (*operclient.DescargaAdjunto, error)
+	// ObtenerAsignacion lee la escolta vigente del viaje para el detalle de
+	// Reacción (E8-T18). Solo audiencia Interno.
+	ObtenerAsignacion(ctx context.Context, id operclient.Id) (*operclient.EscoltaVigente, error)
 }
 
 type consultas struct {
@@ -827,6 +860,12 @@ func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, bod
 		return nil, platformerrors.NewNoAutorizado("operacion: transicionarViaje sin claims en el contexto")
 	}
 	return c.m.viajes.Transicionar(ctx, id, body, claims.Rol, string(claims.Audiencia), claims.TenantID)
+}
+
+// ObtenerAsignacion comparte la guarda y el caso de uso con
+// handleObtenerAsignacion (I3).
+func (c *consultas) ObtenerAsignacion(ctx context.Context, id operclient.Id) (*operclient.EscoltaVigente, error) {
+	return c.m.escolta(ctx, id)
 }
 
 // ListarAdjuntos reenvía al mismo caso de uso que handleListarAdjuntos (I3).
