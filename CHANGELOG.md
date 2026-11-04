@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## 2026-11-04 HORA — Escolta vigente del viaje: `obtenerAsignacion` (E8-T18, `tracer.37`)
+
+**Para quién:** el `bff` y `pf-svc-core`. El detalle de Reacción (`obtenerEmergencia`, DEC-121 #2) exige la escolta del viaje y `operacion` no tenía ninguna lectura de la asignación vigente; ahora la tiene por HTTP y en proceso.
+
+**Resumen:** monta `obtenerAsignacion` (`GET /api/v1/viajes/{id}/asignacion`) y la agrega a `ConsultasAPI`. Devuelve `EscoltaVigente`: las unidades de la asignación vigente, cada una con su `tipo`, `vehiculo_id`, `custodios_ids` y `activa` del roster, ordenadas por `id`. Sin asignación vigente (viaje aún no asignado o ya liberado) responde 200 con `unidades: []`.
+
+**Comportamiento:**
+- Solo audiencia Interno. El Cliente recibe 404 (DEC-132); sin claims, 401. La guarda vive en `Module.escolta`, compartida por HTTP y en proceso (I3).
+- Tras reasignar, solo aparece la escolta nueva.
+- Una unidad reservada que no existe en el roster se omite (`Asignar` aún no valida contra `roster.unidad`; comentario `shortcut` en `Escolta`).
+
+**Cambios:**
+- `internal/asignacion/servicio.go`: `Escolta` lee asignación vigente + reservas + `roster.unidad` + `roster.unidad_custodio` con el pool de `op_asignacion`, que ya tenía `SELECT` sobre esas tablas. Sin migración.
+- `operacion.go`: ruta `GET /api/v1/viajes/{id}/asignacion`, `handleObtenerAsignacion`, `escolta` (guarda) y `consultas.ObtenerAsignacion`.
+- `go.mod`: `api-client-go` `v0.1.0-tracer.36` → `v0.1.0-tracer.37`.
+- Pruebas: `TestEscoltaDelViaje` (viaje sin asignación → `[]`; dos unidades con tipo, vehículo y custodios; tras reasignar solo la nueva) y `TestConsultasObtenerAsignacion` (interno 200 por fachada y HTTP con `unidades: []`, Cliente 404, sin claims 401).
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/asignacion/servicio.go`, `internal/asignacion/servicio_integration_test.go`
+- `operacion.go`, `consultas_integration_test.go`
+- `go.mod`, `go.sum`
+
 ## 2026:11:04 — Evidencia del viaje: adjuntos con URL de vida corta (E6-T4 / E6-HU-027)
 
 **Para quién:** `pf-svc-core` y el `bff`, que ya reenvían las tres operaciones de adjuntos pero no tenían servicio detrás. Esto desbloquea que la evidencia del viaje responda de extremo a extremo. Para quien mantiene el servicio: un módulo nuevo `internal/adjuntos`, con la metadata en `bitacora` y los bytes fuera del servicio.
