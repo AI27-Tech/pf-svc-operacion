@@ -1,5 +1,121 @@
 # CHANGELOG
 
+## 2026-11-04 16:47 — Ficha técnica del viaje: `obtenerFicha` / `guardarFicha` (E8-T12, DEC-104, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el monitorista. La ficha del panel (E8-T12) corría contra un mock porque `operacion` no guardaba tracto, contenedores ni GPS. Para quien mantiene el servicio: una migración nueva de columnas sobre `viajes.viaje`.
+
+**Resumen:** monta `obtenerFicha` (`GET /api/v1/viajes/{id}/ficha`) y `guardarFicha` (`PATCH`, mismo path) y los agrega a `ConsultasAPI`. Forma de DEC-104: `tracto` objeto `{placas, economico, marca, modelo, color}` o `null`, `contenedores` 0..N `{economico, placas, sello, color}`, `gps_ids`. Todo opcional. `tipo_servicio` no entra (es del viaje, solo lectura).
+
+**Comportamiento:**
+- Leer: solo audiencia Interno; el Cliente recibe 404 (DEC-132). Guardar: `monitorista`, `supervisor`, `coordinador` y `administrador` (DEC-060 #2); otro rol, 403. Sin claims, 401. Viaje inexistente, 404.
+- Guardado parcial: propiedad ausente no se toca; `contenedores`/`gps_ids` presentes reemplazan la lista y `[]` la borra; `"tracto": null` borra el tracto. Un contenedor sin datos se descarta; `gps_ids` repetidos se deduplican conservando el orden; un texto vacío o de solo espacios cuenta como ausente. Campo desconocido, 400.
+- En la fachada en proceso, `Tracto` nil no toca el tracto y `&Tracto{}` lo borra: el tipo generado no distingue `null` de ausente, así que quien recibe el JSON traduce `"tracto": null` a `&Tracto{}` (el handler HTTP de aquí ya lo hace).
+- Editable en cualquier estado: la ficha no gatea transiciones en V1 (DEC-104 #3). Los `gps_ids` no se validan contra `catalogos` (son referencias, DEC-104 #5).
+- Sin evento ni auditoría: el registro no declara evento, y `op_viajes` no tiene `GRANT` sobre `auditoria`.
+
+**Cambios:**
+- `migrations/viajes/0005_ficha_tecnica.sql` (nuevo): columnas `tracto_placas`, `tracto_economico`, `tracto_marca`, `tracto_modelo`, `tracto_color` (`TEXT`), `contenedores` (`JSONB`, default `[]`) y `gps_ids` (`UUID[]`, default `{}`) en `viajes.viaje`. Idempotente; sin `GRANT` (`op_viajes` ya tiene `SELECT/INSERT/UPDATE` sobre la tabla). La columna `tracto TEXT` de 0001, sin uso, se deja.
+- `internal/viajes/ficha.go` (nuevo): `ObtenerFicha`, `GuardarFicha` (un solo `UPDATE` con las columnas presentes) y `fichaDe`.
+- `facultades.go`: entrada `guardarFicha`.
+- `operacion.go`: rutas, `handleObtenerFicha`, `handleGuardarFicha` (rechaza campos desconocidos y detecta `"tracto": null`), `Module.ficha`, `Module.guardarFicha`, `consultas.ObtenerFicha` y `consultas.GuardarFicha`.
+- Pruebas: `TestConsultasFicha` (ficha vacía; guardado con contenedor vacío descartado y GPS deduplicados; `gps_ids: []` parcial; `"tracto": null` por HTTP; campo desconocido 400; jefe_operativo 403 por fachada y HTTP; Cliente 404; viaje inexistente 404).
+
+**Migración:** `migrations/viajes/0005_ficha_tecnica.sql`. La toma el embed `viajes/*.sql`; el aplicador de `pf-svc-core` (`cmd/migrate`) la corre en la fase 2 con el ejecutor del rol `op_viajes`.
+
+**Archivos modificados:**
+- `migrations/viajes/0005_ficha_tecnica.sql`, `internal/viajes/ficha.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
+## 2026-11-04 16:44 — Histórico de incidencias del viaje: `listarIncidencias` (E8-T13, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el histórico del panel (E8-T13, DEC-105). El panel solo veía las incidencias abiertas (en `obtenerViaje`); ahora lee el histórico completo.
+
+**Resumen:** monta `listarIncidencias` (`GET /api/v1/viajes/{id}/incidencias`) y lo agrega a `ConsultasAPI`. Devuelve `PaginaIncidencias`: abiertas (`en_atencion`) y resueltas (`resuelta`, con `resuelta_en`), ordenadas por apertura, 50 por página con cursor keyset sobre `(abierta_en, id)`.
+
+**Comportamiento:**
+- Solo audiencia Interno, cualquier rol interno; el Cliente recibe 404 (DEC-132, como `obtenerAsignacion`); sin claims, 401. Sin acotar por tenant (DEC-129).
+- El estado se deriva de `cerrada_en`, igual que al abrir y resolver.
+- Un viaje sin incidencias, o inexistente, da página vacía (como `listarEstadias`).
+- Cursor ilegible: 400.
+
+**Cambios:**
+- `internal/viajes/incidencia.go`: `ListarIncidencias` sobre `viajes.condicion_viaje` (`tipo = 'INCIDENCIA'`), con el pool de `op_viajes`.
+- `facultades.go`: `exigirInterno`, la guarda de lectura interna.
+- `operacion.go`: ruta, `handleListarIncidencias`, `Module.incidencias` y `consultas.ListarIncidencias`.
+- Pruebas: `TestConsultasListarIncidencias` (una resuelta y una abierta con su `tipo_interno` literal, por fachada y HTTP; Cliente 404). El avance del cursor se comprobó con una prueba desechable (página 2 trae solo la segunda incidencia); no se versiona porque exige más de 50 filas por la vía pública.
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/viajes/incidencia.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
+## 2026-11-04 16:43 — Fecha/hora del servicio antes de aprobar: `completarFechaHora` (E8-T9, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el jefe operativo. Una solicitud de cliente sin fecha/hora no se podía aprobar desde el panel: la guarda `fecha_hora_servicio_definida` (DEC-010 #2) la exige y no había forma de escribirla.
+
+**Resumen:** monta `completarFechaHora` (`PATCH /api/v1/viajes/{id}/fecha-hora`, el contrato dice `PATCH`) y lo agrega a `ConsultasAPI`. Reemplaza `fecha_hora_servicio` y devuelve el `Viaje`. No es cambio de estado.
+
+**Comportamiento:**
+- Solo `jefe_operativo` y `administrador` (DEC-060 #1, E1-T3). Otro rol, 403; sin claims, 401.
+- Viaje inexistente, 404. Viaje terminal, 409 con `codigo` `viaje_en_estado_terminal`. Cuerpo sin la fecha, 400.
+- No publica evento ni escribe auditoría: el registro de eventos no declara uno, y `op_viajes` no tiene `GRANT` sobre `auditoria` (igual que `fijarEta`).
+
+**Cambios:**
+- `internal/viajes/servicio.go`: `CompletarFechaHora`. `FijarEta` y `CompletarFechaHora` comparten `editarNoTerminal`, que bloquea la fila (`FOR UPDATE`) contra una transición concurrente a terminal. `leerViaje` es la lectura del agregado que ahora usan `Obtener` y `editarNoTerminal`.
+- Corrección en `fijarEta`: su 409 ahora lleva el `codigo` `viaje_en_estado_terminal` que el contrato declara (antes, el genérico de la categoría).
+- `facultades.go`: entrada `completarFechaHora`.
+- `operacion.go`: ruta, `handleCompletarFechaHora`, `Module.fechaHora` y `consultas.CompletarFechaHora`.
+- Pruebas: `TestConsultasCompletarFechaHora` (aprobar sin fecha falla; tras completarla con `2026-11-20T15:30:00Z` se aprueba; monitorista 403; viaje terminal 409 con el código, por fachada y HTTP).
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/viajes/servicio.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
+## 2026-11-04 16:41 — Roster de unidades: `listarUnidades` (E8-T10, `tracer.37`)
+
+**Para quién:** el `bff` y `pf-svc-core`. La pantalla de asignar escolta (E8-T10) corría contra un mock porque `operacion` no leía el roster; ahora lo lee por HTTP y en proceso.
+
+**Resumen:** monta `listarUnidades` (`GET /api/v1/unidades`) y lo agrega a `ConsultasAPI`. Devuelve `PaginaUnidades`: cada unidad con `id`, `tipo`, `vehiculo_id`, `custodios_ids` (ordenados) y `activa`, activas e inactivas, ordenadas por `id`, 50 por página con cursor opaco. Sin aptitud (el contrato no la expone en V1).
+
+**Comportamiento:**
+- Solo `jefe_operativo` y `administrador` (DEC-060 #1). Otro rol interno o el cliente recibe 403; sin claims, 401. Sin acotar por tenant (DEC-129).
+- Cursor ilegible: 400.
+- La facultad vive en `facultades.go` (tabla por `operationId`), compartida por HTTP y en proceso (I3).
+
+**Cambios:**
+- `internal/roster/servicio.go` (nuevo): `Listar` con el pool de `op_roster`, dueño del esquema (I1). `Escanear` y `Columnas` son la única copia del mapeo fila → `Unidad`.
+- `internal/asignacion/servicio.go`: `Escolta` reusa `roster.Escanear` en lugar de su copia del mapeo. Sin cambio de comportamiento.
+- `facultades.go` (nuevo): `exigirFacultad` y la tabla `facultades`.
+- `operacion.go`: ruta, `handleListarUnidades`, `Module.unidades` y `consultas.ListarUnidades`.
+- Pruebas: `TestConsultasListarUnidades` (patrulla activa con dos custodios y moto inactiva con uno, por fachada y HTTP; monitorista 403; cursor ilegible 400 por ambos caminos).
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/roster/servicio.go`, `internal/asignacion/servicio.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
+## 2026-11-04 16:40 — platform-go v0.1.9: un token sin rol ni audiencia se rechaza
+
+**Para quién:** quien llama a `operacion` con un token. Un token verificado que no trae claim `audiencia` ni `rol` ahora recibe 401 `no_autorizado`; antes se tomaba como audiencia Interno, que no se acota por tenant (DEC-129). Los tokens con `audiencia` explícita, con `rol` `cliente` o con cualquiera de los roles internos se comportan igual que antes.
+
+**Cambios:**
+- `go.mod`/`go.sum`: `pf-pkg-platform-go` v0.1.8 → v0.1.9 (PR #41 de platform-go). Sin cambio de código.
+
+**Verificación:** `gofmt` limpio, `go vet ./...`, `go build ./...` (incluye `./cmd/...`), `go test ./...` sin BD y con `OPERACION_TEST_DB` (Postgres 16 local), `arch-test` (v0.1.1 del CI y v0.1.9) en verde. Ninguna prueba arma un token sin rol contra el `auth.Verifier` real (las que usan claims sin rol pasan por autenticadores falsos), así que no se tocó ningún fixture.
+
+
 ## 2026-11-04 15:11 — Escolta vigente del viaje: `obtenerAsignacion` (E8-T18, `tracer.37`)
 
 **Para quién:** el `bff` y `pf-svc-core`. El detalle de Reacción (`obtenerEmergencia`, DEC-121 #2) exige la escolta del viaje y `operacion` no tenía ninguna lectura de la asignación vigente; ahora la tiene por HTTP y en proceso.

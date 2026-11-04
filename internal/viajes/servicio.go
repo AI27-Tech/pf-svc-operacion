@@ -174,23 +174,33 @@ func estadoInicialPara(rol string) operclient.EstadoViaje {
 // obsolescencia (`stale`) la deriva el bff al leer, no operacion. No publica
 // evento (los eventos viaje.* no incluyen el ETA).
 func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient.EtaEntrada) (*operclient.Viaje, error) {
+	return s.editarNoTerminal(ctx, id, "fijar ETA",
+		`UPDATE viajes.viaje SET eta_estimado = $2 WHERE id = $1`, in.EtaEstimado.UTC())
+}
+
+// CompletarFechaHora escribe fecha_hora_servicio sobre un viaje ya creado
+// (completarFechaHora, E1-HU-003): la aprobación la exige (guarda
+// fecha_hora_servicio_definida, DEC-010 #2). Igual que FijarEta, no es cambio de
+// estado: solo rechaza un viaje terminal. Reemplaza el valor previo. No publica
+// evento (el registro no declara ninguno para este dato).
+func (s *Servicio) CompletarFechaHora(ctx context.Context, id operclient.Id, in operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
+	return s.editarNoTerminal(ctx, id, "completar la fecha/hora del servicio",
+		`UPDATE viajes.viaje SET fecha_hora_servicio = $2 WHERE id = $1`, in.FechaHoraServicio.UTC())
+}
+
+// editarNoTerminal aplica `update` ($1 = id, $2 = valor) a un viaje que no está
+// en estado terminal y devuelve el viaje resultante. Bloquea la fila (FOR UPDATE)
+// para que una transición concurrente a terminal no se cuele entre la guarda y
+// la escritura. 404 si no existe; 409 viaje_en_estado_terminal si es terminal.
+func (s *Servicio) editarNoTerminal(ctx context.Context, id operclient.Id, accion, update string, valor any) (*operclient.Viaje, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var (
-		estado    string
-		clienteID uuid.UUID
-		origen    string
-		fhs       *time.Time
-		creado    time.Time
-	)
-	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, creado_en
-		   FROM viajes.viaje WHERE id = $1`, id,
-	).Scan(&estado, &clienteID, &origen, &fhs, &creado)
+	var estado string
+	err = tx.QueryRow(ctx, `SELECT estado FROM viajes.viaje WHERE id = $1 FOR UPDATE`, id).Scan(&estado)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -198,23 +208,46 @@ func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient
 		return nil, fmt.Errorf("operacion: cargar viaje: %w", err)
 	}
 	if estados.EstadoViaje(estado).EsTerminal() {
-		return nil, platformerrors.NewConflicto("operacion: no se fija ETA en un viaje en estado terminal (%s)", estado)
+		return nil, platformerrors.NewConflictoCodigo("viaje_en_estado_terminal",
+			"operacion: no se puede %s en un viaje en estado terminal (%s)", accion, estado)
 	}
-
-	eta := in.EtaEstimado.UTC()
-	if _, err := tx.Exec(ctx, `UPDATE viajes.viaje SET eta_estimado = $1 WHERE id = $2`, eta, id); err != nil {
-		return nil, fmt.Errorf("operacion: actualizar eta: %w", err)
+	if _, err := tx.Exec(ctx, update, id, valor); err != nil {
+		return nil, fmt.Errorf("operacion: %s: %w", accion, err)
 	}
+	v, err := s.leerViaje(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("operacion: commit %s: %w", accion, err)
+	}
+	return v, nil
+}
 
+// leerViaje lee el agregado y sus destinos dentro de tx. 404 si no existe.
+func (s *Servicio) leerViaje(ctx context.Context, tx pgx.Tx, id operclient.Id) (*operclient.Viaje, error) {
+	var (
+		estado    string
+		clienteID uuid.UUID
+		origen    string
+		fhs       *time.Time
+		eta       *time.Time
+		creado    time.Time
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		   FROM viajes.viaje WHERE id = $1`, id,
+	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("operacion: obtener viaje: %w", err)
+	}
 	destinos, err := s.destinosDe(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("operacion: commit fijar eta: %w", err)
-	}
-
 	cid := operclient.Id(clienteID)
 	return &operclient.Viaje{
 		Id:                id,
@@ -223,7 +256,7 @@ func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient
 		Origen:            origen,
 		Destinos:          destinos,
 		FechaHoraServicio: fhs,
-		EtaEstimado:       &eta,
+		EtaEstimado:       eta,
 		CreadoEn:          creado,
 	}, nil
 }
@@ -237,26 +270,7 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var (
-		estado    string
-		clienteID uuid.UUID
-		origen    string
-		fhs       *time.Time
-		eta       *time.Time
-		creado    time.Time
-	)
-	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
-		   FROM viajes.viaje WHERE id = $1`, id,
-	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("operacion: obtener viaje: %w", err)
-	}
-
-	destinos, err := s.destinosDe(ctx, tx, id)
+	v, err := s.leerViaje(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -274,18 +288,8 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 		return nil, err
 	}
 
-	cid := operclient.Id(clienteID)
 	return &operclient.ViajeDetalle{
-		Viaje: operclient.Viaje{
-			Id:                id,
-			Estado:            operclient.EstadoViaje(estado),
-			ClienteId:         &cid,
-			Origen:            origen,
-			Destinos:          destinos,
-			FechaHoraServicio: fhs,
-			EtaEstimado:       eta,
-			CreadoEn:          creado,
-		},
+		Viaje:              *v,
 		CondicionesActivas: conds,
 		IncidenciasActivas: &incs,
 	}, nil
