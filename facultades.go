@@ -16,6 +16,9 @@ import (
 var facultades = map[string][]roles.Rol{
 	// DEC-060 #1: el jefe_operativo arma el roster y asigna.
 	"listarUnidades": {roles.RolJefeOperativo, roles.RolAdministrador},
+	// DEC-060 #1: el jefe_operativo aprueba, y completa la fecha/hora antes de
+	// aprobar (E1-T3, guarda fecha_hora_servicio_definida).
+	"completarFechaHora": {roles.RolJefeOperativo, roles.RolAdministrador},
 }
 
 // exigirFacultad rechaza sin claims (401) y con un rol fuera de facultades[op] (403).

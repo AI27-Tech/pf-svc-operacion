@@ -295,6 +295,38 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(http.HandlerFunc(m.handleDescargarAdjunto)))
 	// Flujo interno del panel (E8-T9/T10/T12/T13): roster para asignar la escolta.
 	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleCompletarFechaHora)))
+}
+
+// handleCompletarFechaHora atiende PATCH /api/v1/viajes/{id}/fecha-hora.
+func (m *Module) handleCompletarFechaHora(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+		return
+	}
+	var body operclient.FechaHoraEntrada
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+		return
+	}
+	v, err := m.fechaHora(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, v)
+}
+
+// fechaHora aplica la facultad de completarFechaHora y delega en viajes (I3).
+func (m *Module) fechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
+	if err := exigirFacultad(ctx, "completarFechaHora"); err != nil {
+		return nil, err
+	}
+	if body.FechaHoraServicio.IsZero() {
+		return nil, platformerrors.NewValidacion("operacion: fecha_hora_servicio es obligatoria")
+	}
+	return m.viajes.CompletarFechaHora(ctx, id, body)
 }
 
 // handleListarUnidades atiende GET /api/v1/unidades: una página del roster.
@@ -834,6 +866,9 @@ type ConsultasAPI interface {
 	// ListarUnidades lee una página del roster para asignar la escolta (E8-T10).
 	// Solo jefe_operativo y administrador (DEC-060 #1); otro rol, 403.
 	ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error)
+	// CompletarFechaHora fija fecha_hora_servicio antes de aprobar (E8-T9). Solo
+	// jefe_operativo y administrador (DEC-060 #1); 409 viaje_en_estado_terminal.
+	CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error)
 }
 
 type consultas struct {
@@ -989,4 +1024,9 @@ func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*
 // ListarUnidades comparte la facultad y el caso de uso con handleListarUnidades (I3).
 func (c *consultas) ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error) {
 	return c.m.unidades(ctx, params)
+}
+
+// CompletarFechaHora comparte la facultad y el caso de uso con handleCompletarFechaHora (I3).
+func (c *consultas) CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
+	return c.m.fechaHora(ctx, id, body)
 }

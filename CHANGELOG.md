@@ -1,5 +1,31 @@
 # CHANGELOG
 
+## 2026-11-04 16:43 — Fecha/hora del servicio antes de aprobar: `completarFechaHora` (E8-T9, `tracer.37`)
+
+**Para quién:** el `bff`, `pf-svc-core` y el jefe operativo. Una solicitud de cliente sin fecha/hora no se podía aprobar desde el panel: la guarda `fecha_hora_servicio_definida` (DEC-010 #2) la exige y no había forma de escribirla.
+
+**Resumen:** monta `completarFechaHora` (`PATCH /api/v1/viajes/{id}/fecha-hora`, el contrato dice `PATCH`) y lo agrega a `ConsultasAPI`. Reemplaza `fecha_hora_servicio` y devuelve el `Viaje`. No es cambio de estado.
+
+**Comportamiento:**
+- Solo `jefe_operativo` y `administrador` (DEC-060 #1, E1-T3). Otro rol, 403; sin claims, 401.
+- Viaje inexistente, 404. Viaje terminal, 409 con `codigo` `viaje_en_estado_terminal`. Cuerpo sin la fecha, 400.
+- No publica evento ni escribe auditoría: el registro de eventos no declara uno, y `op_viajes` no tiene `GRANT` sobre `auditoria` (igual que `fijarEta`).
+
+**Cambios:**
+- `internal/viajes/servicio.go`: `CompletarFechaHora`. `FijarEta` y `CompletarFechaHora` comparten `editarNoTerminal`, que bloquea la fila (`FOR UPDATE`) contra una transición concurrente a terminal. `leerViaje` es la lectura del agregado que ahora usan `Obtener` y `editarNoTerminal`.
+- Corrección en `fijarEta`: su 409 ahora lleva el `codigo` `viaje_en_estado_terminal` que el contrato declara (antes, el genérico de la categoría).
+- `facultades.go`: entrada `completarFechaHora`.
+- `operacion.go`: ruta, `handleCompletarFechaHora`, `Module.fechaHora` y `consultas.CompletarFechaHora`.
+- Pruebas: `TestConsultasCompletarFechaHora` (aprobar sin fecha falla; tras completarla con `2026-11-20T15:30:00Z` se aprueba; monitorista 403; viaje terminal 409 con el código, por fachada y HTTP).
+
+**Migración:** ninguna.
+
+**Archivos modificados:**
+- `internal/viajes/servicio.go`
+- `facultades.go`, `operacion.go`
+- `consultas_integration_test.go`, `consultas_test.go`
+- `CHANGELOG.md`
+
 ## 2026-11-04 16:41 — Roster de unidades: `listarUnidades` (E8-T10, `tracer.37`)
 
 **Para quién:** el `bff` y `pf-svc-core`. La pantalla de asignar escolta (E8-T10) corría contra un mock porque `operacion` no leía el roster; ahora lo lee por HTTP y en proceso.

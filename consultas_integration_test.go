@@ -440,3 +440,48 @@ func TestConsultasListarUnidades(t *testing.T) {
 	_, err = api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{Cursor: &malo})
 	mismoStatus(t, m, err, http.MethodGet, "/api/v1/unidades?cursor=%25%25%25", "", 400)
 }
+
+// TestConsultasCompletarFechaHora: una solicitud sin fecha/hora no se aprueba;
+// el jefe_operativo la completa y entonces sí. Un monitorista recibe 403 y un
+// viaje terminal 409 viaje_en_estado_terminal, igual por fachada y HTTP.
+func TestConsultasCompletarFechaHora(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
+
+	ctxCliente := auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: uuid.NewString()})
+	v, err := api.CrearViaje(ctxCliente, operclient.CrearViajeEntrada{Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}})
+	if err != nil {
+		t.Fatalf("crear viaje: %v", err)
+	}
+	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err == nil {
+		t.Fatal("aprobar sin fecha/hora debió fallar")
+	}
+
+	fecha := time.Date(2026, 11, 20, 15, 30, 0, 0, time.UTC)
+	out, err := api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	if err != nil {
+		t.Fatalf("CompletarFechaHora: %v", err)
+	}
+	if out.Id != v.Id || out.Estado != operclient.SOLICITADO || out.FechaHoraServicio == nil || !out.FechaHoraServicio.Equal(fecha) {
+		t.Errorf("viaje: got id %s estado %q fecha %v, want %s SOLICITADO %v", out.Id, out.Estado, out.FechaHoraServicio, v.Id, fecha)
+	}
+	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err != nil {
+		t.Fatalf("aprobar con fecha/hora: %v", err)
+	}
+
+	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+	if _, err := api.CompletarFechaHora(auth.ContextWithClaims(ctx, monitorista), v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("monitorista: err %v, quiere 403", err)
+	}
+
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id='"+v.Id.String()+"'")
+	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	if got := platformerrors.CodigoDe(err); got != "viaje_en_estado_terminal" {
+		t.Errorf("terminal: codigo %q (err %v), want viaje_en_estado_terminal", got, err)
+	}
+	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+v.Id.String()+"/fecha-hora", `{"fecha_hora_servicio":"2026-11-20T15:30:00Z"}`, 409)
+}
