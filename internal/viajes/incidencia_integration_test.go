@@ -99,10 +99,10 @@ func TestResolverIncidenciaSoloSupervisorOAdmin(t *testing.T) {
 		t.Fatalf("AbrirIncidencia: %v", err)
 	}
 
-	// Monitorista NO puede resolver: rechazo por rol.
+	// Monitorista NO puede resolver: rechazo por rol, 403 (DEC-132).
 	if _, err := svc.ResolverIncidencia(ctx, v.Id, inc.Id,
-		operclient.ResolucionIncidenciaEntrada{Resolucion: "atendida"}, "monitorista"); err == nil {
-		t.Error("resolver por un monitorista debió rechazarse (solo supervisor, coordinador o administrador)")
+		operclient.ResolucionIncidenciaEntrada{Resolucion: "atendida"}, "monitorista"); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("resolver por un monitorista: got %v, want 403 (solo supervisor, coordinador o administrador)", err)
 	}
 	// Sigue abierta: ningún viaje.condicion_cerrada.
 	if n := contarEventos(t, ctx, "viaje.condicion_cerrada", v.Id.String()); n != 0 {
@@ -306,8 +306,8 @@ func TestCoordinadorAbreYResuelveIncidencia(t *testing.T) {
 
 	v := crearInterno(t, ctx, svc)
 	if _, err := svc.AbrirIncidencia(ctx, v.Id,
-		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "operador"); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
-		t.Fatalf("operador (rol retirado): got %v, want NoAutorizado", err)
+		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "operador"); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Fatalf("operador (rol retirado): got %v, want 403", err)
 	}
 	inc, err := svc.AbrirIncidencia(ctx, v.Id,
 		operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"}, "coordinador")

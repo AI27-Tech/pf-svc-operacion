@@ -298,7 +298,8 @@ func TestConsultasBitacora(t *testing.T) {
 }
 
 // TestConsultasIncidencias: un supervisor abre y resuelve; jefe_operativo no
-// puede abrir, igual por fachada y HTTP.
+// puede abrir y un monitorista no puede resolver: 403 (DEC-132) igual por
+// fachada y HTTP.
 func TestConsultasIncidencias(t *testing.T) {
 	ctx := context.Background()
 	m := moduloCompleto(t, ctx)
@@ -319,7 +320,25 @@ func TestConsultasIncidencias(t *testing.T) {
 	}
 
 	_, err = api.AbrirIncidencia(auth.ContextWithClaims(ctx, claimsJefe), id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
-	mismoStatus(t, m, err, http.MethodPost, "/api/v1/viajes/"+id.String()+"/incidencias", `{"tipo_interno":"falla_mecanica"}`, 401)
+	mismoStatus(t, m, err, http.MethodPost, "/api/v1/viajes/"+id.String()+"/incidencias", `{"tipo_interno":"falla_mecanica"}`, 403)
+
+	abierta, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
+	if err != nil {
+		t.Fatalf("AbrirIncidencia (segunda): %v", err)
+	}
+	_, err = api.ResolverIncidencia(auth.ContextWithClaims(ctx, claimsMonitorista), id, abierta.Id, operclient.ResolucionIncidenciaEntrada{Resolucion: "reparada"})
+	if got := platformerrors.AsCategory(err).HTTPStatus(); got != 403 {
+		t.Errorf("monitorista resuelve: got status %d (err %v), want 403", got, err)
+	}
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/viajes/"+id.String()+"/incidencias/"+abierta.Id.String(), strings.NewReader(`{"resolucion":"reparada"}`))
+	req.Header.Set("Authorization", "Bearer monitorista")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"prohibido"`) {
+		t.Errorf("HTTP monitorista resuelve: got status %d body %s, want 403 prohibido", rec.Code, rec.Body)
+	}
 }
 
 // TestConsultasEstadias: abre, lista y cierra una estadía; cerrar una estadía
