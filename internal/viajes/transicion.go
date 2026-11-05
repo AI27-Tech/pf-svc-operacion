@@ -78,10 +78,9 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 			return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 		}
 		// (b) El cliente solo cancela o rechaza (DEC-111). Cualquier otra arista
-		// es facultad del operador: 401 (NewProhibido/403 no existe en la taxonomía
-		// de plataforma; NewNoAutorizado es el patrón ya usado para negar facultad).
+		// es facultad del operador: 403 (DEC-111 #3).
 		if destino != estados.EstadoCancelado && destino != estados.EstadoRechazadoPorCliente {
-			return nil, platformerrors.NewNoAutorizado("operacion: un cliente solo puede cancelar o rechazar su viaje")
+			return nil, platformerrors.NewProhibido("operacion: un cliente solo puede cancelar o rechazar su viaje")
 		}
 		// (c) Motivo OBLIGATORIO en cancelar y rechazar del cliente (DEC-111,
 		// supera DEC-020 #7). Texto libre; vacío o solo espacios no cuenta.

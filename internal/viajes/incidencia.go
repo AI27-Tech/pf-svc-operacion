@@ -63,7 +63,7 @@ var rolesQuePuedenResolverIncidencia = map[string]bool{
 // nunca a un 500.
 func (s *Servicio) AbrirIncidencia(ctx context.Context, viajeID operclient.Id, in operclient.IncidenciaEntrada, rol string) (*operclient.Incidencia, error) {
 	if !rolesQuePuedenAbrirIncidencia[rol] {
-		return nil, platformerrors.NewNoAutorizado("operacion: el rol %q no puede abrir una incidencia", rol)
+		return nil, platformerrors.NewProhibido("operacion: el rol %q no puede abrir una incidencia", rol)
 	}
 	if strings.TrimSpace(in.TipoInterno) == "" {
 		return nil, platformerrors.NewValidacion("operacion: tipo_interno es obligatorio para abrir una incidencia")
@@ -142,7 +142,7 @@ func (s *Servicio) AbrirIncidencia(ctx context.Context, viajeID operclient.Id, i
 // cruzado), la resolución se guarda allí.
 func (s *Servicio) ResolverIncidencia(ctx context.Context, viajeID, incidenciaID operclient.Id, in operclient.ResolucionIncidenciaEntrada, rol string) (*operclient.Incidencia, error) {
 	if !rolesQuePuedenResolverIncidencia[rol] {
-		return nil, platformerrors.NewNoAutorizado("operacion: el rol %q no puede resolver una incidencia", rol)
+		return nil, platformerrors.NewProhibido("operacion: el rol %q no puede resolver una incidencia", rol)
 	}
 	if strings.TrimSpace(in.Resolucion) == "" {
 		return nil, platformerrors.NewValidacion("operacion: la resolución de la incidencia es obligatoria")

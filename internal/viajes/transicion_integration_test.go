@@ -170,8 +170,8 @@ func TestClienteAristaNoPermitidaRechazada(t *testing.T) {
 	motivo := "intento de arista de operador"
 	if _, err := svc.Transicionar(ctx, v.Id,
 		operclient.TransicionEntrada{AEstado: operclient.APROBADO, Causa: &motivo},
-		"cliente", "Cliente", v.ClienteId.String()); err == nil {
-		t.Error("un cliente no puede aprobar su viaje; debió rechazarse")
+		"cliente", "Cliente", v.ClienteId.String()); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("un cliente no puede aprobar su viaje: got %v, want 403 (DEC-111 #3)", err)
 	}
 	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 0 {
 		t.Errorf("no debió publicarse transición: got %d, want 0", n)

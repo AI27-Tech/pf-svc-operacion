@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 2026-11-04 17:49 — Rechazo por rol: 403 en vez de 401 (incidencias y arista de cliente, DEC-132 / DEC-111 #3)
+
+**Para quién:** el `bff`, `pf-svc-core` y el panel. En el recorrido de demo, un monitorista que resolvía una incidencia (`PATCH /api/v1/viajes/{id}/incidencias/{iid}`) recibía 401 `no_autorizado`; el frontend lo puede leer como sesión vencida. El contrato declara 403 y DEC-132 fija 403 para un interno sin permiso. Para quien mantiene el servicio: tres rechazos cambian de categoría, sin cambio de lógica.
+
+**Resumen:** los rechazos de un llamador autenticado sin la facultad pasan a `platformerrors.NewProhibido` (403 `prohibido`, `platform-go v0.1.9`). Sin claims sigue siendo 401.
+
+**Comportamiento:**
+- `abrirIncidencia` con un rol fuera de monitorista/supervisor/coordinador/administrador: 403.
+- `resolverIncidencia` con un rol fuera de supervisor/coordinador/administrador (p. ej. monitorista): 403.
+- `transicionarViaje` de un cliente sobre su propio viaje hacia una arista que no es `CANCELADO`/`RECHAZADO_POR_CLIENTE`: 403 (DEC-111 #3). Esto cierra la inconsistencia "contrato 403, operacion 401" que DEC-111 dejó diferida. El viaje ajeno sigue en 404.
+- Sin cambio: las guardas de `exigirFacultad` y del cierre ya respondían 403; los "sin claims" de la fachada siguen en 401; las rutas HTTP rechazan token ausente o inválido con 401 en el middleware.
+
+**Cambios:**
+- `internal/viajes/incidencia.go`: `AbrirIncidencia` y `ResolverIncidencia` usan `NewProhibido`.
+- `internal/viajes/transicion.go`: la guarda de arista de cliente usa `NewProhibido`; comentario actualizado.
+- Pruebas con status literal: `TestConsultasIncidencias` (jefe_operativo abre: 403 por fachada y HTTP; monitorista resuelve: 403 por fachada y por HTTP con cuerpo `prohibido`), `TestResolverIncidenciaSoloSupervisorOAdmin` (monitorista: 403), `TestCoordinadorAbreYResuelveIncidencia` (rol retirado `operador`: 403), `TestClienteAristaNoPermitidaRechazada` (cliente aprueba: 403).
+
+**Archivos modificados:**
+- `internal/viajes/incidencia.go`, `internal/viajes/transicion.go`
+- `consultas_integration_test.go`, `internal/viajes/incidencia_integration_test.go`, `internal/viajes/transicion_integration_test.go`
+- `CHANGELOG.md`
+
 ## 2026-11-04 16:47 — Ficha técnica del viaje: `obtenerFicha` / `guardarFicha` (E8-T12, DEC-104, `tracer.37`)
 
 **Para quién:** el `bff`, `pf-svc-core` y el monitorista. La ficha del panel (E8-T12) corría contra un mock porque `operacion` no guardaba tracto, contenedores ni GPS. Para quien mantiene el servicio: una migración nueva de columnas sobre `viajes.viaje`.
