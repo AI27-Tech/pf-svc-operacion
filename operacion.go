@@ -999,11 +999,34 @@ func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEn
 }
 
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
+	if tenant, ok := tenantDeCliente(ctx); ok {
+		return c.m.viajes.ListarDeCliente(ctx, params, tenant)
+	}
 	return c.m.viajes.Listar(ctx, params)
 }
 
+// ObtenerViaje acota el detalle al viaje del propio cliente (tenant == cliente_id,
+// DEC-112). Un viaje ajeno responde 404, no 403, para no confirmar que existe
+// (DEC-132).
 func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
-	return c.m.viajes.Obtener(ctx, id)
+	det, err := c.m.viajes.Obtener(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if tenant, ok := tenantDeCliente(ctx); ok && (det.Viaje.ClienteId == nil || det.Viaje.ClienteId.String() != tenant) {
+		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+	}
+	return det, nil
+}
+
+// tenantDeCliente devuelve el tenant del actor y true si su audiencia es Cliente.
+// Sin claims (llamadas de sistema dentro de core) no se acota.
+func tenantDeCliente(ctx context.Context) (string, bool) {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil || claims.Audiencia != auth.AudienciaCliente {
+		return "", false
+	}
+	return claims.TenantID, true
 }
 
 // ListarBitacora reenvía al caso de uso de bitácora (mismo que el handler HTTP,
