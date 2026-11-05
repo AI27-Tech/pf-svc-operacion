@@ -641,3 +641,57 @@ func TestConsultasFicha(t *testing.T) {
 		t.Errorf("viaje inexistente: err %v, quiere no_encontrado", err)
 	}
 }
+
+// TestConsultasAislamientoCliente verifica que un cliente solo lista y lee sus
+// propios viajes (tenant == cliente_id, DEC-112): el viaje de otro cliente no
+// aparece en la lista y su detalle responde 404 (DEC-132). Un interno ve todos.
+func TestConsultasAislamientoCliente(t *testing.T) {
+	ctx := context.Background()
+	m := moduloConViajes(t, ctx)
+	api := m.Consultas()
+
+	ctxDe := func(tenant string) context.Context {
+		return auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-" + tenant, Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: tenant})
+	}
+	fecha := time.Now().Add(24 * time.Hour).UTC()
+	crear := func(c context.Context) operclient.Id {
+		v, err := api.CrearViaje(c, operclient.CrearViajeEntrada{
+			Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
+		})
+		if err != nil {
+			t.Fatalf("crear viaje: %v", err)
+		}
+		return v.Id
+	}
+	ctxA, ctxB := ctxDe(uuid.NewString()), ctxDe(uuid.NewString())
+	viajeA, viajeB := crear(ctxA), crear(ctxB)
+
+	ids := func(c context.Context) []operclient.Id {
+		pag, err := api.ListarViajes(c, operclient.ListarViajesParams{})
+		if err != nil {
+			t.Fatalf("listar viajes: %v", err)
+		}
+		out := []operclient.Id{}
+		for _, v := range pag.Items {
+			out = append(out, v.Id)
+		}
+		return out
+	}
+	if got := ids(ctxA); len(got) != 1 || got[0] != viajeA {
+		t.Errorf("cliente A lista %v, quiero solo [%s]", got, viajeA)
+	}
+	if got := ids(ctxDe("")); len(got) != 0 {
+		t.Errorf("cliente sin tenant lista %v, quiero ninguno", got)
+	}
+	if got := ids(auth.ContextWithClaims(ctx, claimsJefe)); len(got) != 2 {
+		t.Errorf("interno lista %d viajes, quiero 2", len(got))
+	}
+
+	if _, err := api.ObtenerViaje(ctxA, viajeA); err != nil {
+		t.Errorf("cliente A lee su viaje: %v", err)
+	}
+	_, err := api.ObtenerViaje(ctxA, viajeB)
+	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoEncontrado {
+		t.Errorf("cliente A lee el viaje de B: categoría %v (err %v), quiero NoEncontrado", got, err)
+	}
+}

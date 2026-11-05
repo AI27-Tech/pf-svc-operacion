@@ -298,10 +298,21 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 // Listar devuelve una página de viajes, más recientes primero, con filtro
 // opcional por estado y paginación por cursor keyset sobre (creado_en, id).
 //
-// shortcut: no aplica alcance (lista todos, vista del operador interno). El
-// filtrado fino por cliente/unidad espera el vínculo identidad→alcance
-// (DEC-045/DEC-053, pendiente).
+// shortcut: no aplica alcance de flota (lista todos, vista del operador
+// interno). El filtrado fino por unidad espera el vínculo identidad→alcance
+// (DEC-045/DEC-053, pendiente; DT-07). El alcance del cliente va por
+// ListarDeCliente.
 func (s *Servicio) Listar(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
+	return s.listar(ctx, params, nil)
+}
+
+// ListarDeCliente es Listar acotado a los viajes de un cliente (tenant ==
+// cliente_id, DEC-112). Un clienteID vacío no devuelve nada.
+func (s *Servicio) ListarDeCliente(ctx context.Context, params operclient.ListarViajesParams, clienteID string) (*operclient.PaginaViajes, error) {
+	return s.listar(ctx, params, &clienteID)
+}
+
+func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesParams, clienteID *string) (*operclient.PaginaViajes, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -311,6 +322,11 @@ func (s *Servicio) Listar(ctx context.Context, params operclient.ListarViajesPar
 	conds := []string{}
 	args := []any{}
 	n := 1
+	if clienteID != nil {
+		conds = append(conds, fmt.Sprintf("cliente_id::text = $%d", n))
+		args = append(args, *clienteID)
+		n++
+	}
 	if params.Estado != nil {
 		conds = append(conds, fmt.Sprintf("estado = $%d", n))
 		args = append(args, string(*params.Estado))
