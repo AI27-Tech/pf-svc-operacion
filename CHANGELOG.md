@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-11-05 15:49 — Un cliente solo lista y lee sus propios viajes (DEC-112, DEC-132)
+
+**Para quién:** el portal del cliente, que entra por el `bff` en `pf-svc-core`. Antes, `listarViajes` y `obtenerViaje` en proceso no acotaban por cliente: un cliente veía en "Mis viajes" los viajes de todas las empresas y podía leer el seguimiento de cualquiera con su id. Ahora, para audiencia Cliente, la lista solo trae viajes con `cliente_id` igual a su tenant y el detalle de un viaje ajeno responde 404 (no 403, para no confirmar que existe). Un cliente sin tenant no ve nada. Los internos ven lo mismo que antes.
+
+**Cambios:**
+- `operacion.go`: `consultas.ListarViajes` y `consultas.ObtenerViaje` leen los claims; con audiencia Cliente acotan al tenant (`tenantDeCliente`). Sin claims (llamadas de sistema en core) no se acota, igual que hoy.
+- `internal/viajes/servicio.go`: `ListarDeCliente` agrega `cliente_id = tenant` al `WHERE`, antes del cursor, así que la paginación sigue siendo correcta. `Listar` no cambia para internos.
+- `consultas_integration_test.go`: `TestConsultasAislamientoCliente` (dos clientes; lista, detalle ajeno → 404, cliente sin tenant, interno ve todos). Falla sobre `pf-op-d` sin este cambio.
+
+**Verificación:** `gofmt` limpio, `go vet ./...`, `go build ./...`, `go test -count=1 -p 1 ./...` con `OPERACION_TEST_DB` en verde, `arch-test` v0.1.1 y v0.1.9 OK.
+
 ## 2026-11-04 17:49 — Rechazo por rol: 403 en vez de 401 (incidencias y arista de cliente, DEC-132 / DEC-111 #3)
 
 **Para quién:** el `bff`, `pf-svc-core` y el panel. En el recorrido de demo, un monitorista que resolvía una incidencia (`PATCH /api/v1/viajes/{id}/incidencias/{iid}`) recibía 401 `no_autorizado`; el frontend lo puede leer como sesión vencida. El contrato declara 403 y DEC-132 fija 403 para un interno sin permiso. Para quien mantiene el servicio: tres rechazos cambian de categoría, sin cambio de lógica.
