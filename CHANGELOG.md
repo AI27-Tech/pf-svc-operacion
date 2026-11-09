@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## 2026-11-09 12:10 — Alta, lectura y edición de unidades del roster (E8-T21, DEC-142)
+
+**Para quién:** el Jefe Operativo y el Administrador en la sección `/roster` del panel (vía `bff` y `pf-svc-core`). Hoy las unidades se siembran por SQL; ahora `operacion` arma el roster con las reglas de DEC-142. Para quien asigna escoltas: una unidad desactivada ya no se puede asignar. Para quien mantiene el servicio: una migración nueva en `roster`, un puerto nuevo hacia `catalogos` y un candado compartido entre el roster y la asignación.
+
+**Resumen:** monta `crearUnidad` (`POST /api/v1/unidades`, 201), `obtenerUnidad` (`GET /api/v1/unidades/{id}`) y `modificarUnidad` (`PATCH /api/v1/unidades/{id}`) y los agrega a `ConsultasAPI` (I3). Solo `jefe_operativo` y `administrador`; otro rol interno 403, el Cliente 404.
+
+**Comportamiento:**
+- El `tipo` se deriva del vehículo de `catalogos`: coche → `patrulla` con 1 o 2 custodios, moto → `moto` con exactamente 1. Un `tipo` en el cuerpo es 400 (`additionalProperties: false`).
+- 400 `validacion`: vehículo o custodio inexistente o inactivo en `catalogos`, custodios repetidos, lista vacía o de más de dos, o cantidad fuera de la regla del tipo (también al cambiar el vehículo de una unidad).
+- 409 `vehiculo_en_otra_unidad` / `custodio_en_otra_unidad`: el vehículo o un custodio ya está en otra unidad **activa** (al crear, al cambiar vehículo o custodios y al reactivar). Una unidad desactivada no cuenta. Lo garantiza la base con índices únicos parciales, también entre altas concurrentes.
+- 409 `unidad_con_reserva_vigente`: la unidad tiene reserva en un viaje no terminal; no se cambia vehículo, custodios ni `activa`. Con el viaje terminal, o tras reasignar la escolta, se edita.
+- `asignarRecursos` y la reasignación solo reservan unidades del roster: inexistente 400, desactivada 409. La escolta de un viaje cuya unidad reservada no está en el roster es error (antes se omitía en silencio).
+- `activa` omitida al crear vale `true`. Sin el puerto `Atomos` cableado, crear o cambiar vehículo/custodios responde 503.
+
+**Cambios:**
+- `migrations/roster/0003_exclusividad.sql`: índice único parcial `unidad_vehiculo_activa_unico`; columna `activa` en `roster.unidad_custodio` mantenida por la FK compuesta `(unidad_id, activa) → unidad (id, activa) ON UPDATE CASCADE`; índice único parcial `unidad_custodio_activa_unico`. Idempotente; copia `activa` de las filas existentes.
+- `internal/roster/armado.go` (nuevo): `Crear`, `Obtener`, `Modificar`, reglas de tipo y traducción de los índices a 409. `internal/roster/servicio.go`: puertos `Atomos` y `Reservas`.
+- `internal/asignacion/servicio.go`: `SinReservaVigente` (guarda de reserva con el rol `op_asignacion`), candado consultivo por unidad compartido con `Asignar`/`Reasignar`, `verificarUnidades` y la escolta sin omisiones.
+- `ports.go`: puerto `AtomosCatalogo` (`obtenerVehiculo`, `obtenerCustodio`); `Deps.Atomos`. `adapters/http/aptitud_recursos.go`: el adaptador HTTP lo implementa; `cmd/api` lo cablea.
+- `operacion.go`, `facultades.go`: rutas, fachada y facultades (`exigirFacultadInterna`).
+- Pruebas: `roster_integration_test.go` (alta, tipo y cantidad, exclusividad de vehículo y custodio con reactivación, alta concurrente, reserva vigente, roles, asignar solo activas) y `TestSinReservaVigente`/`TestAsignarSoloUnidadesActivasDelRoster` en `internal/asignacion`. Fixtures ajustados: los de asignación siembran sus unidades en el roster; `TestEscoltaDelViaje` ya no pone un custodio en dos unidades activas.
+
+**Verificación:** `gofmt` limpio, `go vet ./...`, `go build ./...`, `go test -count=1 -p 1 ./...` con `OPERACION_TEST_DB` en verde, `arch-test` v0.1.1 OK. 16 mutantes (quitar cada índice, la cascada, la guarda, el candado, la verificación del roster, cada validación y cada facultad) hacen fallar su prueba.
+
+**Archivos modificados:**
+- `migrations/roster/0003_exclusividad.sql`, `internal/roster/armado.go`, `internal/roster/servicio.go`
+- `internal/asignacion/servicio.go`, `internal/asignacion/servicio_integration_test.go`
+- `operacion.go`, `facultades.go`, `ports.go`, `adapters/http/aptitud_recursos.go`, `cmd/api/main.go`
+- `roster_integration_test.go`, `consultas_integration_test.go`, `README.md`, `CHANGELOG.md`
+
 ## 2026-11-05 15:49 — Un cliente solo lista y lee sus propios viajes (DEC-112, DEC-132)
 
 **Para quién:** el portal del cliente, que entra por el `bff` en `pf-svc-core`. Antes, `listarViajes` y `obtenerViaje` en proceso no acotaban por cliente: un cliente veía en "Mis viajes" los viajes de todas las empresas y podía leer el seguimiento de cualquiera con su id. Ahora, para audiencia Cliente, la lista solo trae viajes con `cliente_id` igual a su tenant y el detalle de un viaje ajeno responde 404 (no 403, para no confirmar que existe). Un cliente sin tenant no ve nada. Los internos ven lo mismo que antes.

@@ -15,7 +15,8 @@ import (
 	operacion "github.com/AI27-Tech/pf-svc-operacion"
 )
 
-// AptitudRecursosHTTP implementa operacion.AptitudRecursos con el cliente
+// AptitudRecursosHTTP implementa operacion.AptitudRecursos y operacion.AtomosCatalogo
+// (las dos lecturas de la arista a catalogos) con el cliente
 // generado de catalogos. Respeta el presupuesto de tiempo (operacion.PresupuestoAptitud,
 // el mismo valor que debe usar el adaptador en proceso de core, I3) y traduce
 // los errores a la taxonomía de la plataforma, igual que debe hacer el adaptador
@@ -24,7 +25,10 @@ type AptitudRecursosHTTP struct {
 	cli *catalogos.ClientWithResponses
 }
 
-var _ operacion.AptitudRecursos = (*AptitudRecursosHTTP)(nil)
+var (
+	_ operacion.AptitudRecursos = (*AptitudRecursosHTTP)(nil)
+	_ operacion.AtomosCatalogo  = (*AptitudRecursosHTTP)(nil)
+)
 
 // NewAptitudRecursosHTTP crea el adaptador apuntando a la URL base de catalogos.
 func NewAptitudRecursosHTTP(baseURL string, doer catalogos.HttpRequestDoer) (*AptitudRecursosHTTP, error) {
@@ -49,7 +53,7 @@ func (a *AptitudRecursosHTTP) AptitudVehiculo(ctx context.Context, vehiculoID, c
 	if err != nil {
 		return nil, traducirError("AptitudVehiculo", err)
 	}
-	return aptitudDeRespuesta(resp.StatusCode(), resp.JSON200)
+	return deRespuesta(resp.StatusCode(), resp.JSON200)
 }
 
 // AptitudCustodio devuelve la aptitud informativa de un custodio (DEC-055),
@@ -62,23 +66,47 @@ func (a *AptitudRecursosHTTP) AptitudCustodio(ctx context.Context, custodioID, c
 	if err != nil {
 		return nil, traducirError("AptitudCustodio", err)
 	}
-	return aptitudDeRespuesta(resp.StatusCode(), resp.JSON200)
+	return deRespuesta(resp.StatusCode(), resp.JSON200)
 }
 
-// aptitudDeRespuesta traduce el código HTTP a la taxonomía de la plataforma. Un
-// fallo NO gatea: el caso de uso trata el error como "aptitud desconocida"
-// (DEC-055); por eso se devuelve degradado, no roto, cuando catalogos no da 200.
-func aptitudDeRespuesta(status int, apt *catalogos.Aptitud) (*catalogos.Aptitud, error) {
+// ObtenerVehiculo lee el vehículo vigente por id (puerto AtomosCatalogo, E8-T21).
+func (a *AptitudRecursosHTTP) ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error) {
+	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
+	defer cancel()
+
+	resp, err := a.cli.ObtenerVehiculoWithResponse(ctx, vehiculoID, &catalogos.ObtenerVehiculoParams{})
+	if err != nil {
+		return nil, traducirError("ObtenerVehiculo", err)
+	}
+	return deRespuesta(resp.StatusCode(), resp.JSON200)
+}
+
+// ObtenerCustodio lee el custodio vigente por id (puerto AtomosCatalogo, E8-T21).
+func (a *AptitudRecursosHTTP) ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error) {
+	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
+	defer cancel()
+
+	resp, err := a.cli.ObtenerCustodioWithResponse(ctx, custodioID, &catalogos.ObtenerCustodioParams{})
+	if err != nil {
+		return nil, traducirError("ObtenerCustodio", err)
+	}
+	return deRespuesta(resp.StatusCode(), resp.JSON200)
+}
+
+// deRespuesta traduce el código HTTP a la taxonomía de la plataforma. 404 es
+// no_encontrado (el roster lo vuelve referencia inválida); cualquier otro no-200
+// es degradado, no roto: la aptitud lo trata como "aptitud desconocida"
+// (DEC-055) y el roster como catalogos no disponible.
+func deRespuesta[T any](status int, v *T) (*T, error) {
 	switch status {
 	case http.StatusOK:
-		return apt, nil
+		return v, nil
 	case http.StatusNotFound:
 		return nil, platformerrors.NewNoEncontrado("catalogos: recurso no encontrado")
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return nil, platformerrors.NewNoAutorizado("catalogos: no autorizado")
 	default:
-		// Degradado, no roto: la aptitud es informativa y su ausencia no bloquea.
-		return nil, platformerrors.NewDegradado("catalogos: aptitud no disponible (status %d)", status)
+		return nil, platformerrors.NewDegradado("catalogos: respuesta no disponible (status %d)", status)
 	}
 }
 
