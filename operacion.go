@@ -63,6 +63,11 @@ type Pools struct {
 type Deps struct {
 	// Aptitud es la arista a catalogos (lectura de átomos + aptitud informativa).
 	Aptitud AptitudRecursos
+	// Atomos es la lectura por id de vehículos y custodios de catalogos (misma
+	// arista), con la que el roster deriva el tipo de la unidad y valida sus
+	// referencias (E8-T21). Si es nil, crearUnidad y modificarUnidad con vehículo
+	// o custodios responden 503: no se arma una unidad sin poder validarla.
+	Atomos AtomosCatalogo
 	// Revocacion es la arista restringida a identidad (DEC-051). Opcional en el
 	// esqueleto; sin ella, la autorización corre sin proyección de tombstones.
 	Revocacion Revocacion
@@ -140,14 +145,16 @@ const umbralFrescura = 15 * time.Second
 // caso de uso de viajes sobre el pool del rol op_viajes.
 func New(p Pools, d Deps) (*Module, error) {
 	pub := outbox.NewPublisher()
+	asig := asignacion.NewServicio(p.Asignacion, pub)
 	m := &Module{
 		pools:      p,
 		deps:       d,
 		viajes:     viajes.NewServicio(p.Viajes, pub),
-		asignacion: asignacion.NewServicio(p.Asignacion, pub),
+		asignacion: asig,
 		bitacora:   bitacora.NewServicio(p.Bitacora),
-		// Lectura del roster de unidades (listarUnidades) con su rol dueño op_roster.
-		roster: roster.NewServicio(p.Roster),
+		// Roster de unidades con su rol dueño op_roster; la guarda de reserva
+		// vigente la presta asignacion con op_asignacion (DEC-142 #5, I1).
+		roster: roster.NewServicio(p.Roster, d.Atomos, asig),
 		// Evidencia del viaje (E6-T4): metadata con op_bitacora, rastro con
 		// op_auditoria (dos pools, un rol cada uno, I1). El almacén de objetos es
 		// un stub hasta ADR 32 (MinIO): firma URL de marcador, los bytes no pasan
@@ -297,6 +304,10 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(http.HandlerFunc(m.handleDescargarAdjunto)))
 	// Flujo interno del panel (E8-T9/T10/T12/T13): roster para asignar la escolta.
 	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
+	// Armado del roster (E8-T21, DEC-142).
+	mux.Handle("POST /api/v1/unidades", protegido(http.HandlerFunc(m.handleCrearUnidad)))
+	mux.Handle("GET /api/v1/unidades/{id}", protegido(http.HandlerFunc(m.handleObtenerUnidad)))
+	mux.Handle("PATCH /api/v1/unidades/{id}", protegido(http.HandlerFunc(m.handleModificarUnidad)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleCompletarFechaHora)))
 	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleListarIncidencias)))
 	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(http.HandlerFunc(m.handleObtenerFicha)))
@@ -450,6 +461,91 @@ func (m *Module) unidades(ctx context.Context, params operclient.ListarUnidadesP
 		return nil, err
 	}
 	return m.roster.Listar(ctx, params)
+}
+
+// handleCrearUnidad atiende POST /api/v1/unidades. Un campo fuera del contrato
+// (p. ej. `tipo`, que se deriva del vehículo) es 400: additionalProperties false.
+func (m *Module) handleCrearUnidad(w http.ResponseWriter, r *http.Request) {
+	var body operclient.UnidadEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	u, err := m.crearUnidad(r.Context(), body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusCreated, u)
+}
+
+// handleObtenerUnidad atiende GET /api/v1/unidades/{id}.
+func (m *Module) handleObtenerUnidad(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de unidad inválido"))
+		return
+	}
+	u, err := m.obtenerUnidad(r.Context(), id)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, u)
+}
+
+// handleModificarUnidad atiende PATCH /api/v1/unidades/{id}; mismo decodificado
+// estricto que el alta.
+func (m *Module) handleModificarUnidad(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		escribirError(w, platformerrors.NewValidacion("operacion: id de unidad inválido"))
+		return
+	}
+	var body operclient.UnidadModificacion
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	u, err := m.modificarUnidad(r.Context(), id, body)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, u)
+}
+
+// decodificarEstricto lee el cuerpo JSON rechazando propiedades desconocidas (400).
+func decodificarEstricto(r *http.Request, v any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+	}
+	return nil
+}
+
+// crearUnidad, obtenerUnidad y modificarUnidad aplican la facultad (DEC-142 #3)
+// y delegan en el roster; las comparten HTTP y la fachada (I3).
+func (m *Module) crearUnidad(ctx context.Context, body operclient.UnidadEntrada) (*operclient.Unidad, error) {
+	if err := exigirFacultadInterna(ctx, "crearUnidad"); err != nil {
+		return nil, err
+	}
+	return m.roster.Crear(ctx, body)
+}
+
+func (m *Module) obtenerUnidad(ctx context.Context, id operclient.Id) (*operclient.Unidad, error) {
+	if err := exigirFacultadInterna(ctx, "obtenerUnidad"); err != nil {
+		return nil, err
+	}
+	return m.roster.Obtener(ctx, id)
+}
+
+func (m *Module) modificarUnidad(ctx context.Context, id operclient.Id, body operclient.UnidadModificacion) (*operclient.Unidad, error) {
+	if err := exigirFacultadInterna(ctx, "modificarUnidad"); err != nil {
+		return nil, err
+	}
+	return m.roster.Modificar(ctx, id, body)
 }
 
 // handleTransicionar atiende POST /api/v1/viajes/{id}/transiciones: lee el estado
@@ -966,6 +1062,13 @@ type ConsultasAPI interface {
 	// ListarUnidades lee una página del roster para asignar la escolta (E8-T10).
 	// Solo jefe_operativo y administrador (DEC-060 #1); otro rol, 403.
 	ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error)
+	// CrearUnidad, ObtenerUnidad y ModificarUnidad arman el roster (E8-T21,
+	// DEC-142). Solo jefe_operativo y administrador; otro rol interno 403, el
+	// Cliente 404. Rechazos 409 con código: vehiculo_en_otra_unidad,
+	// custodio_en_otra_unidad y (al modificar) unidad_con_reserva_vigente.
+	CrearUnidad(ctx context.Context, body operclient.UnidadEntrada) (*operclient.Unidad, error)
+	ObtenerUnidad(ctx context.Context, id operclient.Id) (*operclient.Unidad, error)
+	ModificarUnidad(ctx context.Context, id operclient.Id, body operclient.UnidadModificacion) (*operclient.Unidad, error)
 	// CompletarFechaHora fija fecha_hora_servicio antes de aprobar (E8-T9). Solo
 	// jefe_operativo y administrador (DEC-060 #1); 409 viaje_en_estado_terminal.
 	CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error)
@@ -1158,6 +1261,21 @@ func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*
 // ListarUnidades comparte la facultad y el caso de uso con handleListarUnidades (I3).
 func (c *consultas) ListarUnidades(ctx context.Context, params operclient.ListarUnidadesParams) (*operclient.PaginaUnidades, error) {
 	return c.m.unidades(ctx, params)
+}
+
+// CrearUnidad comparte la facultad y el caso de uso con handleCrearUnidad (I3).
+func (c *consultas) CrearUnidad(ctx context.Context, body operclient.UnidadEntrada) (*operclient.Unidad, error) {
+	return c.m.crearUnidad(ctx, body)
+}
+
+// ObtenerUnidad comparte la facultad y el caso de uso con handleObtenerUnidad (I3).
+func (c *consultas) ObtenerUnidad(ctx context.Context, id operclient.Id) (*operclient.Unidad, error) {
+	return c.m.obtenerUnidad(ctx, id)
+}
+
+// ModificarUnidad comparte la facultad y el caso de uso con handleModificarUnidad (I3).
+func (c *consultas) ModificarUnidad(ctx context.Context, id operclient.Id, body operclient.UnidadModificacion) (*operclient.Unidad, error) {
+	return c.m.modificarUnidad(ctx, id, body)
 }
 
 // CompletarFechaHora comparte la facultad y el caso de uso con handleCompletarFechaHora (I3).

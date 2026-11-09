@@ -39,9 +39,8 @@ const PresupuestoAptitud = 2 * time.Second
 // el puerto ya usa ese nombre. La aptitud se evalúa contra el contrato/SLA de un
 // cliente, así que ambas operaciones reciben `clienteID` (lo exige el contrato).
 //
-// BRECHA aún abierta: falta un obtenerVehiculo / obtenerCustodio por id (solo hay
-// lista + aptitud). El puerto no inventa ese método; se agrega cuando el contrato
-// lo tenga.
+// La lectura por id (obtenerVehiculo / obtenerCustodio) vive en el puerto
+// AtomosCatalogo, no aquí.
 type AptitudRecursos interface {
 	// AptitudVehiculo y AptitudCustodio devuelven aptitud INFORMATIVA (DEC-055):
 	// nunca gatean armar la unidad ni asignarla. Si catalogos no responde o el
@@ -50,6 +49,22 @@ type AptitudRecursos interface {
 	// clienteID acota la evaluación al contrato/SLA de ese cliente (tracer.4).
 	AptitudVehiculo(ctx context.Context, vehiculoID, clienteID catalogos.Id) (*catalogos.Aptitud, error)
 	AptitudCustodio(ctx context.Context, custodioID, clienteID catalogos.Id) (*catalogos.Aptitud, error)
+}
+
+// AtomosCatalogo es la lectura por id de los átomos de catalogos (obtenerVehiculo
+// y obtenerCustodio), sobre la MISMA arista operacion -> catalogos que
+// AptitudRecursos. Cierra la brecha de arriba para el armado del roster (E8-T21,
+// DEC-142): el tipo de la unidad se deriva del tipo del vehículo, y vehículo y
+// custodios deben existir y estar activos. A diferencia de la aptitud, esta
+// lectura SÍ gatea: sin ella no se puede armar ni recomponer una unidad.
+//
+// Es un puerto aparte, y no dos métodos más de AptitudRecursos, para no romper
+// los adaptadores de aptitud existentes (el en proceso de core y la caché de
+// internal/catalogoscache) y porque su semántica de error es otra: un 404 de
+// catalogos aquí es una referencia inválida, no una aptitud desconocida.
+type AtomosCatalogo interface {
+	ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error)
+	ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error)
 }
 
 // Revocacion es la arista RESTRINGIDA hacia identidad (DEC-051): solo dos

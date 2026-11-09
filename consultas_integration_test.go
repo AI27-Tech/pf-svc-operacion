@@ -170,7 +170,7 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 		Asignacion: pool("op_asignacion", "viajes"),
 		Bitacora:   pool("op_bitacora", ""),
 		Roster:     pool("op_roster", ""),
-	}, operacion.Deps{Verificador: autenticadorJefe{}})
+	}, operacion.Deps{Verificador: autenticadorJefe{}, Atomos: catalogo})
 	if err != nil {
 		t.Fatalf("operacion.New: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestConsultasAsignarRecursos(t *testing.T) {
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
 
 	id := viajeAprobado(t, ctx, api)
-	a, err := api.AsignarRecursos(ctxJefe, id, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{uuid.New()}})
+	a, err := api.AsignarRecursos(ctxJefe, id, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{crear(t, api, moto(), custodio()).Id}})
 	if err != nil {
 		t.Fatalf("AsignarRecursos: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestConsultasAsignarRecursos(t *testing.T) {
 	}
 
 	// Ya ASIGNADO: no se vuelve a asignar (solo APROBADO).
-	u := uuid.New()
+	u := crear(t, api, moto(), custodio()).Id
 	_, err = api.AsignarRecursos(ctxJefe, id, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u}})
 	mismoStatus(t, m, err, http.MethodPost, "/api/v1/viajes/"+id.String()+"/asignacion", `{"unidades_ids":["`+u.String()+`"]}`, 409)
 
@@ -426,10 +426,10 @@ func TestConsultasListarUnidades(t *testing.T) {
 	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa) VALUES
 		('`+patrulla.String()+`', 'patrulla', '`+veh1.String()+`', true),
 		('`+moto.String()+`', 'moto', '`+veh2.String()+`', false)`)
-	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad_custodio (unidad_id, custodio_id) VALUES
-		('`+patrulla.String()+`', '`+cus2.String()+`'),
-		('`+patrulla.String()+`', '`+cus1.String()+`'),
-		('`+moto.String()+`', '`+cus3.String()+`')`)
+	dbtest.Exec(t, ctx, admin, `INSERT INTO roster.unidad_custodio (unidad_id, custodio_id, activa) VALUES
+		('`+patrulla.String()+`', '`+cus2.String()+`', true),
+		('`+patrulla.String()+`', '`+cus1.String()+`', true),
+		('`+moto.String()+`', '`+cus3.String()+`', false)`)
 
 	pag, err := api.ListarUnidades(auth.ContextWithClaims(ctx, claimsJefe), operclient.ListarUnidadesParams{})
 	if err != nil {
