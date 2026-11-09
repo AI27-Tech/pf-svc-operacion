@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/dbtest"
@@ -77,6 +78,26 @@ func sembrarViaje(t *testing.T, ctx context.Context, estado string, conFecha boo
 	return id
 }
 
+// unidad siembra una unidad activa en el roster y devuelve su id: Asignar y
+// Reasignar solo reservan unidades del roster.
+func unidad(t *testing.T, ctx context.Context) operclient.Id {
+	t.Helper()
+	return unidadCon(t, ctx, true)
+}
+
+// unidadCon siembra una moto del roster con el `activa` dado.
+func unidadCon(t *testing.T, ctx context.Context, activa bool) operclient.Id {
+	t.Helper()
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	id := uuid.New()
+	if _, err := admin.Exec(ctx, `INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa) VALUES ($1, 'moto', $2, $3)`,
+		id, uuid.NewString(), activa); err != nil {
+		t.Fatalf("sembrar unidad: %v", err)
+	}
+	return id
+}
+
 func contar(t *testing.T, ctx context.Context, sql string, args ...any) int {
 	t.Helper()
 	admin, cerrar := dbtest.AdminConn(t, ctx)
@@ -104,7 +125,7 @@ func TestAsignarEscolta(t *testing.T) {
 	svc := prepara(t, ctx)
 
 	viajeID := sembrarViaje(t, ctx, "APROBADO", true)
-	u1, u2 := uuid.New(), uuid.New()
+	u1, u2 := unidad(t, ctx), unidad(t, ctx)
 
 	out, err := svc.Asignar(ctx, viajeID, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u1, u2}}, "actor-1")
 	if err != nil {
@@ -141,15 +162,15 @@ func TestAsignarUnidadYaReservadaEsConflicto(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	unidad := uuid.New() // misma unidad para ambos viajes (ventanas solapadas por misma fecha)
+	u := unidad(t, ctx) // misma unidad para ambos viajes (ventanas solapadas por misma fecha)
 
 	v1 := sembrarViaje(t, ctx, "APROBADO", true)
-	if _, err := svc.Asignar(ctx, v1, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad}}, "a"); err != nil {
+	if _, err := svc.Asignar(ctx, v1, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u}}, "a"); err != nil {
 		t.Fatalf("primera asignación: %v", err)
 	}
 
 	v2 := sembrarViaje(t, ctx, "APROBADO", true)
-	_, err := svc.Asignar(ctx, v2, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad}}, "a")
+	_, err := svc.Asignar(ctx, v2, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u}}, "a")
 	if err == nil {
 		t.Fatal("asignar la misma unidad en ventana solapada debió fallar (409)")
 	}
@@ -170,11 +191,11 @@ func TestAsignarRequiereAprobado(t *testing.T) {
 	svc := prepara(t, ctx)
 
 	vSolicitado := sembrarViaje(t, ctx, "SOLICITADO", true)
-	if _, err := svc.Asignar(ctx, vSolicitado, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{uuid.New()}}, "a"); err == nil {
+	if _, err := svc.Asignar(ctx, vSolicitado, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad(t, ctx)}}, "a"); err == nil {
 		t.Error("asignar un viaje no APROBADO debió fallar")
 	}
 
-	if _, err := svc.Asignar(ctx, uuid.New(), operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{uuid.New()}}, "a"); err == nil {
+	if _, err := svc.Asignar(ctx, uuid.New(), operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad(t, ctx)}}, "a"); err == nil {
 		t.Error("asignar un viaje inexistente debió fallar")
 	}
 
@@ -200,7 +221,7 @@ func TestReasignarEscolta(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	u1, u2, u3 := uuid.New(), uuid.New(), uuid.New()
+	u1, u2, u3 := unidad(t, ctx), unidad(t, ctx), unidad(t, ctx)
 	viajeID := asignaViaje(t, ctx, svc, u1, u2)
 
 	out, err := svc.Reasignar(ctx, viajeID, operclient.ReasignacionEntrada{
@@ -247,7 +268,7 @@ func TestReasignarPuedeConservarUnidad(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	u1, u2 := uuid.New(), uuid.New()
+	u1, u2 := unidad(t, ctx), unidad(t, ctx)
 	viajeID := asignaViaje(t, ctx, svc, u1)
 
 	if _, err := svc.Reasignar(ctx, viajeID, operclient.ReasignacionEntrada{
@@ -264,22 +285,22 @@ func TestReasignarSinAsignacionVigenteEsConflicto(t *testing.T) {
 	// Viaje APROBADO pero nunca asignado: no hay nada que reasignar.
 	vAprobado := sembrarViaje(t, ctx, "APROBADO", true)
 	if _, err := svc.Reasignar(ctx, vAprobado, operclient.ReasignacionEntrada{
-		UnidadesIds: []operclient.Id{uuid.New()}, Motivo: "x",
+		UnidadesIds: []operclient.Id{unidad(t, ctx)}, Motivo: "x",
 	}, "a"); err == nil {
 		t.Error("reasignar un viaje sin asignación vigente debió fallar")
 	}
 
 	// Viaje inexistente.
 	if _, err := svc.Reasignar(ctx, uuid.New(), operclient.ReasignacionEntrada{
-		UnidadesIds: []operclient.Id{uuid.New()}, Motivo: "x",
+		UnidadesIds: []operclient.Id{unidad(t, ctx)}, Motivo: "x",
 	}, "a"); err == nil {
 		t.Error("reasignar un viaje inexistente debió fallar")
 	}
 
 	// Sin motivo → inválido (aunque haya asignación vigente).
-	viajeID := asignaViaje(t, ctx, svc, uuid.New())
+	viajeID := asignaViaje(t, ctx, svc, unidad(t, ctx))
 	if _, err := svc.Reasignar(ctx, viajeID, operclient.ReasignacionEntrada{
-		UnidadesIds: []operclient.Id{uuid.New()}, Motivo: "  ",
+		UnidadesIds: []operclient.Id{unidad(t, ctx)}, Motivo: "  ",
 	}, "a"); err == nil {
 		t.Error("reasignar sin motivo debió fallar")
 	}
@@ -290,7 +311,7 @@ func TestReasignarViajeTerminalEsConflicto(t *testing.T) {
 	svc := prepara(t, ctx)
 
 	// Un viaje que llegó a asignarse y luego cerró: no se reasigna.
-	viajeID := asignaViaje(t, ctx, svc, uuid.New())
+	viajeID := asignaViaje(t, ctx, svc, unidad(t, ctx))
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
 	if _, err := admin.Exec(ctx, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id=$1", viajeID); err != nil {
@@ -298,7 +319,7 @@ func TestReasignarViajeTerminalEsConflicto(t *testing.T) {
 	}
 
 	if _, err := svc.Reasignar(ctx, viajeID, operclient.ReasignacionEntrada{
-		UnidadesIds: []operclient.Id{uuid.New()}, Motivo: "tarde",
+		UnidadesIds: []operclient.Id{unidad(t, ctx)}, Motivo: "tarde",
 	}, "a"); err == nil {
 		t.Error("reasignar un viaje terminal debió fallar")
 	}
@@ -311,11 +332,11 @@ func TestReasignarConflictoRevierteAsignacionOriginal(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	u1 := uuid.New()
+	u1 := unidad(t, ctx)
 	viajeA := asignaViaje(t, ctx, svc, u1)
 
 	// Otro viaje ocupa u2 en la misma ventana (misma fecha de servicio).
-	u2 := uuid.New()
+	u2 := unidad(t, ctx)
 	_ = asignaViaje(t, ctx, svc, u2)
 
 	// Reasignar A a u2 debe chocar (u2 ya reservada) y revertir todo.
@@ -354,12 +375,12 @@ func TestEscoltaDelViaje(t *testing.T) {
 
 	u1, u2, u3 := uuid.New(), uuid.New(), uuid.New()
 	v1, v2, v3 := uuid.New(), uuid.New(), uuid.New()
-	c1, c2, c3 := uuid.New(), uuid.New(), uuid.New()
+	c1, c2, c3, c4 := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	for _, u := range []struct {
 		id, vehiculo uuid.UUID
 		tipo         string
 		custodios    []uuid.UUID
-	}{{u1, v1, "patrulla", []uuid.UUID{c1, c2}}, {u2, v2, "moto", []uuid.UUID{c3}}, {u3, v3, "moto", []uuid.UUID{c1}}} {
+	}{{u1, v1, "patrulla", []uuid.UUID{c1, c2}}, {u2, v2, "moto", []uuid.UUID{c3}}, {u3, v3, "moto", []uuid.UUID{c4}}} {
 		if _, err := admin.Exec(ctx, `INSERT INTO roster.unidad (id, tipo, vehiculo_id) VALUES ($1, $2, $3)`,
 			u.id, u.tipo, u.vehiculo.String()); err != nil {
 			t.Fatalf("sembrar unidad: %v", err)
@@ -404,5 +425,106 @@ func TestEscoltaDelViaje(t *testing.T) {
 	e, err = svc.Escolta(ctx, viajeID)
 	if err != nil || len(e.Unidades) != 1 || e.Unidades[0].Id != u3 {
 		t.Fatalf("tras reasignar: %+v err %v; quiere solo la unidad %s", e, err, u3)
+	}
+}
+
+// TestSinReservaVigente: la guarda de edición del roster (DEC-142 #5) corre la
+// edición sin reserva, y mientras la edición no termina una asignación de esa
+// misma unidad espera el candado (no reserva en medio). Con la reserva hecha en
+// un viaje no terminal la guarda responde 409 unidad_con_reserva_vigente sin
+// correr la edición; con el viaje terminal, la deja pasar.
+func TestSinReservaVigente(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+	u := unidad(t, ctx)
+	viajeID := sembrarViaje(t, ctx, "APROBADO", true)
+
+	dentro, soltar := make(chan struct{}), make(chan struct{})
+	guarda := make(chan error, 1)
+	go func() {
+		guarda <- svc.SinReservaVigente(ctx, u, func(context.Context) error {
+			close(dentro)
+			<-soltar
+			return nil
+		})
+	}()
+	<-dentro
+	asignado := make(chan error, 1)
+	go func() {
+		_, err := svc.Asignar(ctx, viajeID, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{u}}, "actor-1")
+		asignado <- err
+	}()
+	select {
+	case err := <-asignado:
+		close(soltar) // suelta la guarda para que el Cleanup pueda cerrar el pool
+		<-guarda
+		t.Fatalf("Asignar terminó (err %v) con la edición del roster en curso; debió esperar el candado", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(soltar)
+	if err := <-guarda; err != nil {
+		t.Fatalf("guarda sin reserva: %v", err)
+	}
+	if err := <-asignado; err != nil {
+		t.Fatalf("Asignar tras la edición: %v", err)
+	}
+
+	corrio := false
+	err := svc.SinReservaVigente(ctx, u, func(context.Context) error { corrio = true; return nil })
+	if platformerrors.CodigoDe(err) != "unidad_con_reserva_vigente" || corrio {
+		t.Fatalf("con reserva vigente: err %v, corrió %v; quiere 409 unidad_con_reserva_vigente sin correr", err, corrio)
+	}
+
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id='"+viajeID.String()+"'")
+	if err := svc.SinReservaVigente(ctx, u, func(context.Context) error { corrio = true; return nil }); err != nil || !corrio {
+		t.Fatalf("viaje terminal: err %v, corrió %v; quiere sin error y corrida", err, corrio)
+	}
+}
+
+// TestAsignarSoloUnidadesActivasDelRoster: Asignar y Reasignar solo reservan
+// unidades del roster activas. Una unidad inexistente es 400 y una desactivada
+// 409, sin dejar asignación ni mover el viaje. La escolta de un viaje con una
+// reserva cuya unidad desapareció del roster es error, no se omite.
+func TestAsignarSoloUnidadesActivasDelRoster(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	viajeID := sembrarViaje(t, ctx, "APROBADO", true)
+	_, err := svc.Asignar(ctx, viajeID, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad(t, ctx), uuid.New()}}, "a")
+	if platformerrors.AsCategory(err) != platformerrors.CategoryValidacion {
+		t.Errorf("asignar una unidad inexistente: err %v; quiere 400", err)
+	}
+	_, err = svc.Asignar(ctx, viajeID, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidadCon(t, ctx, false)}}, "a")
+	if platformerrors.AsCategory(err) != platformerrors.CategoryConflicto {
+		t.Errorf("asignar una unidad desactivada: err %v; quiere 409", err)
+	}
+	if e := estadoDe(t, ctx, viajeID); e != "APROBADO" {
+		t.Errorf("tras los rechazos el viaje debió seguir APROBADO, está en %q", e)
+	}
+	if n := contar(t, ctx, "SELECT count(*) FROM asignacion.asignacion_viaje WHERE viaje_id=$1", viajeID); n != 0 {
+		t.Errorf("los rechazos no debieron dejar asignación, hay %d", n)
+	}
+
+	u := unidad(t, ctx)
+	asignado := asignaViaje(t, ctx, svc, u)
+	_, err = svc.Reasignar(ctx, asignado, operclient.ReasignacionEntrada{UnidadesIds: []operclient.Id{uuid.New()}, Motivo: "x"}, "a")
+	if platformerrors.AsCategory(err) != platformerrors.CategoryValidacion {
+		t.Errorf("reasignar a una unidad inexistente: err %v; quiere 400", err)
+	}
+	_, err = svc.Reasignar(ctx, asignado, operclient.ReasignacionEntrada{UnidadesIds: []operclient.Id{unidadCon(t, ctx, false)}, Motivo: "x"}, "a")
+	if platformerrors.AsCategory(err) != platformerrors.CategoryConflicto {
+		t.Errorf("reasignar a una unidad desactivada: err %v; quiere 409", err)
+	}
+	if n := contar(t, ctx, "SELECT count(*) FROM asignacion.reserva_recurso WHERE unidad_id=$1", u); n != 1 {
+		t.Errorf("la escolta original debió seguir reservada, reservas=%d", n)
+	}
+
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	dbtest.Exec(t, ctx, admin, "DELETE FROM roster.unidad WHERE id='"+u.String()+"'")
+	if _, err := svc.Escolta(ctx, asignado); err == nil {
+		t.Error("escolta con una unidad reservada fuera del roster: sin error; quiere error")
 	}
 }
