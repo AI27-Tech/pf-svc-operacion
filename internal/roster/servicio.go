@@ -1,9 +1,11 @@
-// Package roster es la lectura del roster de `unidades` (ADR 31 §5 / ADR 33):
-// paquetes pre-armados de un vehículo con uno o dos custodios, referidos por
-// identificador de catalogos. Lee con el rol dueño op_roster (I1).
+// Package roster es el roster de `unidades` (ADR 31 §5 / ADR 33): paquetes
+// pre-armados de un vehículo con uno o dos custodios, referidos por
+// identificador de catalogos. Lee y escribe con el rol dueño op_roster (I1).
 //
-// Solo lectura en esta rebanada (listarUnidades, E8-T10). El alta y la edición
-// del roster (crearUnidad/modificarUnidad) no están montadas todavía.
+// Lectura (listarUnidades, obtenerUnidad) y armado (crearUnidad,
+// modificarUnidad, E8-T21, DEC-142). La exclusividad de vehículo y custodio
+// entre unidades activas la garantiza la base (roster/0003_exclusividad.sql);
+// la guarda de reserva vigente la presta asignacion (puerto Reservas).
 package roster
 
 import (
@@ -11,6 +13,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
+	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/google/uuid"
@@ -22,14 +25,35 @@ type BeginTx interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
-// Servicio lee el roster con el pool de op_roster.
-type Servicio struct {
-	tx BeginTx
+// Atomos es la misma forma del puerto operacion.AtomosCatalogo, declarada aquí
+// para no importar la raíz (mismo patrón que internal/catalogoscache).
+type Atomos interface {
+	ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error)
+	ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error)
 }
 
-// NewServicio recibe el pool del rol op_roster.
-func NewServicio(tx BeginTx) *Servicio {
-	return &Servicio{tx: tx}
+// Reservas es la guarda de reserva vigente (DEC-142 #5). La implementa
+// asignacion con su rol dueño op_asignacion: op_roster no lee asignacion ni
+// viajes (I1, sin GRANT cruzado nuevo).
+type Reservas interface {
+	// SinReservaVigente corre fn solo si la unidad no tiene reserva en un viaje
+	// no terminal, y la mantiene bloqueada contra reservas nuevas mientras fn
+	// corre. Si la tiene, devuelve 409 unidad_con_reserva_vigente.
+	SinReservaVigente(ctx context.Context, unidadID uuid.UUID, fn func(context.Context) error) error
+}
+
+// Servicio es el caso de uso del roster con el pool de op_roster.
+type Servicio struct {
+	tx       BeginTx
+	atomos   Atomos
+	reservas Reservas
+}
+
+// NewServicio recibe el pool del rol op_roster, la lectura de átomos de
+// catalogos (nil si la raíz no la cableó: el armado responde 503) y la guarda
+// de reservas de asignacion.
+func NewServicio(tx BeginTx, atomos Atomos, reservas Reservas) *Servicio {
+	return &Servicio{tx: tx, atomos: atomos, reservas: reservas}
 }
 
 // paginaMax es el tamaño de página de Listar.

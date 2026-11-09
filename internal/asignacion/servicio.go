@@ -8,9 +8,11 @@
 package asignacion
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,6 +91,14 @@ func (s *Servicio) Asignar(ctx context.Context, viajeID operclient.Id, in opercl
 	// probatorio se escribe en la MISMA tx, sin ruta que lo omita (P3).
 	reg := auditoria.Registro{ViajeID: viajeID.String(), Modulo: "asignacion", Accion: "asignar", ActorID: actorID}
 	err = auditoria.Interceptar(ctx, tx, reg, func(ctx context.Context, tx pgx.Tx) error {
+		// Candado compartido con la edición del roster (SinReservaVigente); con
+		// él tomado, el roster leído es el confirmado y nadie lo cambia en medio.
+		if err := bloquearUnidades(ctx, tx, in.UnidadesIds); err != nil {
+			return err
+		}
+		if err := verificarUnidades(ctx, tx, in.UnidadesIds); err != nil {
+			return err
+		}
 		asigID := uuid.New()
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO asignacion.asignacion_viaje (id, viaje_id) VALUES ($1, $2)`, asigID, viajeID,
@@ -214,6 +224,14 @@ func (s *Servicio) Reasignar(ctx context.Context, viajeID operclient.Id, in oper
 
 	reg := auditoria.Registro{ViajeID: viajeID.String(), Modulo: "asignacion", Accion: "reasignar", ActorID: actorID}
 	err = auditoria.Interceptar(ctx, tx, reg, func(ctx context.Context, tx pgx.Tx) error {
+		// Candado compartido con la edición del roster (SinReservaVigente); con
+		// él tomado, el roster leído es el confirmado y nadie lo cambia en medio.
+		if err := bloquearUnidades(ctx, tx, in.UnidadesIds); err != nil {
+			return err
+		}
+		if err := verificarUnidades(ctx, tx, in.UnidadesIds); err != nil {
+			return err
+		}
 		// Liberar la asignación vigente. Si no hay ninguna, el viaje nunca fue
 		// asignado: no hay nada que reasignar (descarta SOLICITADO/APROBADO).
 		var vigenteID uuid.UUID
@@ -307,14 +325,115 @@ func esViolacionExclusion(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23P01"
 }
 
+// bloquearUnidades toma, hasta el fin de la tx, un candado consultivo por unidad
+// y en orden de id (dos asignaciones con unidades cruzadas no se interbloquean).
+// Es el candado que comparten la reserva (Asignar/Reasignar) y la edición del
+// roster (SinReservaVigente): sin él, el roster podría revisar "sin reserva" y
+// una asignación reservar la unidad antes de que la edición confirme. Es
+// consultivo y no un FOR UPDATE sobre roster.unidad porque op_asignacion solo
+// tiene SELECT sobre el roster (FOR UPDATE exige UPDATE).
+func bloquearUnidades(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) error {
+	for _, id := range slices.SortedFunc(slices.Values(ids), func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) }) {
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended('roster.unidad:' || $1::text, 0))`, id.String(),
+		); err != nil {
+			return fmt.Errorf("operacion: bloquear la unidad %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// verificarUnidades exige que cada unidad a reservar exista en el roster (400)
+// y esté activa (409): una unidad desactivada no está disponible para
+// asignarse (contrato, `Unidad.activa`; DEC-142 #2). Lee roster.unidad con el
+// SELECT que op_asignacion ya tiene (ADR 33).
+func verificarUnidades(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) error {
+	rows, err := tx.Query(ctx, `SELECT id, activa FROM roster.unidad WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("operacion: leer unidades del roster: %w", err)
+	}
+	activa := map[uuid.UUID]bool{}
+	for rows.Next() {
+		var id uuid.UUID
+		var a bool
+		if err := rows.Scan(&id, &a); err != nil {
+			rows.Close()
+			return fmt.Errorf("operacion: leer unidad del roster: %w", err)
+		}
+		activa[id] = a
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("operacion: iterar unidades del roster: %w", err)
+	}
+	for _, id := range ids {
+		a, ok := activa[id]
+		if !ok {
+			return platformerrors.NewValidacion("operacion: la unidad %s no existe en el roster", id)
+		}
+		if !a {
+			return platformerrors.NewConflicto("operacion: la unidad %s está desactivada; no se puede asignar", id)
+		}
+	}
+	return nil
+}
+
+// SinReservaVigente es la guarda de edición del roster (DEC-142 #5, puerto
+// roster.Reservas). Con la unidad bloqueada, busca sus reservas en viajes no
+// terminales; si hay alguna responde 409 unidad_con_reserva_vigente, y si no,
+// corre fn (la edición, en su propia tx de op_roster) sin soltar el candado. Lee
+// con op_asignacion, que ya ve asignacion y viajes.viaje: op_roster no recibe un
+// GRANT cruzado nuevo (I1, ADR 33).
+//
+// El candado se toma en ESTA tx, antes de que fn pida su conexión de op_roster:
+// así el orden de adquisición es siempre op_asignacion -> op_roster y un pool
+// agotado por asignaciones que esperan el candado no deja a fn sin conexión.
+func (s *Servicio) SinReservaVigente(ctx context.Context, unidadID uuid.UUID, fn func(context.Context) error) error {
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("operacion: abrir transacción de la guarda de reserva: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // solo lee: el rollback suelta el candado
+
+	if err := bloquearUnidades(ctx, tx, []uuid.UUID{unidadID}); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT v.id, v.estado
+		   FROM asignacion.reserva_recurso r
+		   JOIN asignacion.asignacion_viaje a ON a.id = r.asignacion_id
+		   JOIN viajes.viaje v ON v.id = a.viaje_id
+		  WHERE r.unidad_id = $1 AND a.liberada_en IS NULL`, unidadID)
+	if err != nil {
+		return fmt.Errorf("operacion: leer reservas de la unidad %s: %w", unidadID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var viajeID uuid.UUID
+		var estado string
+		if err := rows.Scan(&viajeID, &estado); err != nil {
+			return fmt.Errorf("operacion: leer reserva de la unidad %s: %w", unidadID, err)
+		}
+		if !estados.EstadoViaje(estado).EsTerminal() {
+			return platformerrors.NewConflictoCodigo("unidad_con_reserva_vigente",
+				"operacion: la unidad %s tiene reserva en el viaje %s (%s); reasigna la escolta primero", unidadID, viajeID, estado)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("operacion: iterar reservas de la unidad %s: %w", unidadID, err)
+	}
+	rows.Close()
+	return fn(ctx)
+}
+
 // Escolta devuelve las unidades de la asignación vigente del viaje, cada una con
 // su tipo, vehículo y custodios del roster (obtenerAsignacion). Sin asignación
 // vigente, unidades va vacío: no es error. Lo usa el bff para la escolta del
 // detalle de Reacción (DEC-121 #2).
 //
-// shortcut: una unidad reservada que no está en el roster se omite (Asignar no
-// verifica el roster todavía, ADR 31 "Pendiente real"); se vuelve error cuando
-// Asignar valide contra roster.unidad.
+// Asignar y Reasignar solo reservan unidades del roster (verificarUnidades), así
+// que una reserva sin su unidad en el roster es un dato roto: es error, no se
+// omite en silencio.
 func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*operclient.EscoltaVigente, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
@@ -347,6 +466,18 @@ func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*opercli
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("operacion: iterar la escolta: %w", err)
+	}
+	var reservadas int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(DISTINCT r.unidad_id)
+		   FROM asignacion.asignacion_viaje a
+		   JOIN asignacion.reserva_recurso r ON r.asignacion_id = a.id
+		  WHERE a.viaje_id = $1 AND a.liberada_en IS NULL`, viajeID,
+	).Scan(&reservadas); err != nil {
+		return nil, fmt.Errorf("operacion: contar la escolta reservada: %w", err)
+	}
+	if reservadas != len(unidades) {
+		return nil, fmt.Errorf("operacion: la escolta del viaje %s reserva %d unidades y el roster tiene %d", viajeID, reservadas, len(unidades))
 	}
 	return &operclient.EscoltaVigente{ViajeId: viajeID, Unidades: unidades}, nil
 }

@@ -89,10 +89,10 @@ desalineado o ausente se reporta y **no se escribe a mano** (contrato primero).
 | **Átomo `vehículo` (ADR 31)** en lugar de `Unidad` (ADR 24) | ❌ el contrato aún dice `/unidades` | el puerto usa `Unidad`; el rename espera a tracer.4 (C3) |
 | **Asignación por escolta (1..N unidades)** | ❌ `asignarRecursos` pide `unidad_id`+`custodios_ids` (ADR 24) | la forma de asignación se alinea en tracer.4 |
 | Eventos `viaje.asignado/reasignado` con escolta | ❌ llevan `unidad_id`+`custodios_ids` | ídem |
-| `obtenerUnidad`/`obtenerCustodio` por id | ❌ solo hay lista + aptitud | el puerto no inventa el método; se añade cuando el contrato lo tenga |
+| `obtenerVehiculo`/`obtenerCustodio` por id (catalogos) | ✅ presentes | puerto `AtomosCatalogo` (E8-T21): tipo de la unidad y referencias válidas |
 | `PATCH /viajes/{id}/eta` sin `stale` (ADR 20) | ❌ el contrato trae `eta_cliente.obsoleto` | no se implementa el cálculo de obsolescencia |
 | Guarda `ningun_recurso_no_apto` / 409 `recurso_no_apto` | ⚠️ el contrato aún los trae | **NO se implementan** (DEC-055); se van en tracer.4 |
-| Rutas del roster de `unidades` (E1-HU-031) | ❌ ausentes | el roster no se scaffoldea (ver pendientes) |
+| Rutas del roster de `unidades` (E1-HU-031) | ✅ presentes | `listarUnidades` (E8-T10); `crearUnidad`/`obtenerUnidad`/`modificarUnidad` (E8-T21, DEC-142). Los `409` de unidades aún no están en el contrato |
 
 ## Decisiones de arquitectura resueltas (antes pendientes)
 

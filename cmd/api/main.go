@@ -105,7 +105,7 @@ func run() error {
 		Bitacora:   bitacora,
 		Auditoria:  auditoria,
 		Roster:     roster,
-	}, operacion.Deps{Aptitud: aptitud})
+	}, operacion.Deps{Aptitud: aptitud, Atomos: aptitud})
 	if err != nil {
 		return err
 	}
