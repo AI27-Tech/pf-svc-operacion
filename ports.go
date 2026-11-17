@@ -52,7 +52,8 @@ type AptitudRecursos interface {
 }
 
 // AtomosCatalogo es la lectura por id de los átomos de catalogos (obtenerVehiculo
-// y obtenerCustodio), sobre la MISMA arista operacion -> catalogos que
+// y obtenerCustodio) y del cliente al que sirve una unidad (obtenerCliente,
+// DEC-149 #2, tracer.41), sobre la MISMA arista operacion -> catalogos que
 // AptitudRecursos. Cierra la brecha de arriba para el armado del roster (E8-T21,
 // DEC-142): el tipo de la unidad se deriva del tipo del vehículo, y vehículo y
 // custodios deben existir y estar activos. A diferencia de la aptitud, esta
@@ -65,6 +66,9 @@ type AptitudRecursos interface {
 type AtomosCatalogo interface {
 	ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error)
 	ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error)
+	// ObtenerCliente valida el `cliente_id` de una unidad: inexistente o inactivo
+	// es 400 (operacion.yaml, crearUnidad y modificarUnidad, tracer.41).
+	ObtenerCliente(ctx context.Context, clienteID catalogos.Id) (*catalogos.Cliente, error)
 }
 
 // Revocacion es la arista RESTRINGIDA hacia identidad (DEC-051): solo dos

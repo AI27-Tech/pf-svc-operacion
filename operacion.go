@@ -339,23 +339,14 @@ func (m *Module) handleGuardarFicha(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
 		return
 	}
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
-		return
-	}
 	var body operclient.FichaTecnicaEntrada
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+	raw, err := leerEstricto(r, &body)
+	if err != nil {
+		escribirError(w, err)
 		return
 	}
-	if body.Tracto == nil {
-		var props map[string]json.RawMessage
-		if json.Unmarshal(raw, &props) == nil && string(bytes.TrimSpace(props["tracto"])) == "null" {
-			body.Tracto = &operclient.Tracto{}
-		}
+	if body.Tracto == nil && campoNulo(raw, "tracto") {
+		body.Tracto = &operclient.Tracto{}
 	}
 	f, err := m.guardarFicha(r.Context(), id, body)
 	if err != nil {
@@ -495,15 +486,17 @@ func (m *Module) handleObtenerUnidad(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModificarUnidad atiende PATCH /api/v1/unidades/{id}; mismo decodificado
-// estricto que el alta.
+// estricto que el alta. Como en la ficha, el tipo generado no distingue
+// `"cliente_id": null` (quitar el cliente) de la propiedad ausente (no tocarlo):
+// el handler lo lee en el JSON crudo y lo pasa como &roster.QuitarCliente.
 func (m *Module) handleModificarUnidad(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		escribirError(w, platformerrors.NewValidacion("operacion: id de unidad inválido"))
 		return
 	}
-	var body operclient.UnidadModificacion
-	if err := decodificarEstricto(r, &body); err != nil {
+	body, err := leerUnidadModificacion(r)
+	if err != nil {
 		escribirError(w, err)
 		return
 	}
@@ -515,14 +508,43 @@ func (m *Module) handleModificarUnidad(w http.ResponseWriter, r *http.Request) {
 	escribirJSON(w, http.StatusOK, u)
 }
 
+// leerUnidadModificacion decodifica el PATCH de una unidad: `"cliente_id": null`
+// llega como &roster.QuitarCliente; ausente, como nil (DEC-149 #2).
+func leerUnidadModificacion(r *http.Request) (operclient.UnidadModificacion, error) {
+	var body operclient.UnidadModificacion
+	raw, err := leerEstricto(r, &body)
+	if err == nil && body.ClienteId == nil && campoNulo(raw, "cliente_id") {
+		body.ClienteId = &roster.QuitarCliente
+	}
+	return body, err
+}
+
 // decodificarEstricto lee el cuerpo JSON rechazando propiedades desconocidas (400).
 func decodificarEstricto(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
+	_, err := leerEstricto(r, v)
+	return err
+}
+
+// leerEstricto es decodificarEstricto que además devuelve el cuerpo crudo, para
+// los PATCH que distinguen `null` de una propiedad ausente (campoNulo).
+func leerEstricto(r *http.Request, v any) ([]byte, error) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+		return nil, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
 	}
-	return nil
+	return raw, nil
+}
+
+// campoNulo dice si el objeto JSON raw trae la propiedad campo con valor null.
+// Ausente no es null: es "no tocar" en un PATCH.
+func campoNulo(raw []byte, campo string) bool {
+	var props map[string]json.RawMessage
+	return json.Unmarshal(raw, &props) == nil && string(bytes.TrimSpace(props[campo])) == "null"
 }
 
 // crearUnidad, obtenerUnidad y modificarUnidad aplican la facultad (DEC-142 #3)
@@ -1066,6 +1088,10 @@ type ConsultasAPI interface {
 	// DEC-142). Solo jefe_operativo y administrador; otro rol interno 403, el
 	// Cliente 404. Rechazos 409 con código: vehiculo_en_otra_unidad,
 	// custodio_en_otra_unidad y (al modificar) unidad_con_reserva_vigente.
+	// cliente_id (DEC-149 #2): 400 si no existe o está inactivo en catalogos. En
+	// ModificarUnidad, ClienteId nil no toca el cliente y &uuid.Nil lo quita:
+	// quien recibe el JSON traduce `"cliente_id": null` a &uuid.Nil antes de
+	// llamar (el tipo generado no distingue null de ausente).
 	CrearUnidad(ctx context.Context, body operclient.UnidadEntrada) (*operclient.Unidad, error)
 	ObtenerUnidad(ctx context.Context, id operclient.Id) (*operclient.Unidad, error)
 	ModificarUnidad(ctx context.Context, id operclient.Id, body operclient.UnidadModificacion) (*operclient.Unidad, error)
