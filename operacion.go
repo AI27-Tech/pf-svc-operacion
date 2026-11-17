@@ -9,7 +9,8 @@
 // repartirlos entre servicios convierte la asignación en sagas que sobrevenden.
 //
 // Capa de dominio. Arista síncrona saliente: una sola, hacia catalogos (y la
-// restringida a identidad para revocación, DEC-051). No llama a mensajeria,
+// restringida a identidad para revocación y el snapshot de alcances, DEC-051 y
+// DEC-149 #20). No llama a mensajeria,
 // reportes, realtime ni procesamiento: todo les llega por evento.
 //
 // Vive en el deployable `core`; cmd/api solo existe para arranque standalone
@@ -1044,8 +1045,12 @@ func escribirError(w http.ResponseWriter, err error) {
 // durable de catalogo.actualizado cuando la raíz inyectó el Subscriber (E5-T5):
 // invalida la caché en proceso de aptitud. El consumidor durable de
 // sesion.revocada sigue por el canal de difusión (Broadcaster), no por el
-// Subscriber. Sin BusPublisher ni Subscriber ni Broadcaster, la lista va vacía
-// (arranque standalone sin bus).
+// Subscriber. Con Subscriber también arranca el de alcance.cambiado (DEC-149
+// #20), cuyo efecto es durable en viajes.alcance_sujeto e idempotente por
+// construcción (snapshot ordenado por cambiado_en); con Deps.Alcances va
+// envuelto por la reconstrucción y su Ready es not-ready hasta converger. Sin
+// BusPublisher ni Subscriber ni Broadcaster, la lista va vacía (arranque
+// standalone sin bus).
 func (m *Module) Workers() []worker.Worker {
 	var ws []worker.Worker
 	if m.relay != nil {

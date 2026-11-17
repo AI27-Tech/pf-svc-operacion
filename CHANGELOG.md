@@ -1,5 +1,41 @@
 # CHANGELOG
 
+## 2026-11-17 16:25 — Alcance del monitoreo por cliente y cliente de la unidad (tracer.41, DEC-149)
+
+**Para quién:** el panel interno (vía `bff` y `pf-svc-core`). El Monitorista, el Supervisor y el Coordinador dejan de ver todos los viajes: ven solo los de sus clientes efectivos ("mis clientes" en `identidad`) que pasaron por `APROBADO`. El Jefe Operativo arma la unidad con el cliente al que sirve. Para quien mantiene el servicio: una proyección nueva en Postgres, un consumidor durable con reconstrucción al arrancar, una tercera operación en la arista restringida a `identidad` y una guarda única de alcance para todas las rutas de viaje.
+
+**Resumen:** sube el pin a `v0.1.0-tracer.41` (sin constantes renombradas). Aplica la regla de alcance de `operacion.yaml` en `listarViajes`, `obtenerViaje` y todos sus subrecursos, proyecta `alcance.cambiado` y agrega `cliente_id` a la unidad del roster.
+
+**Comportamiento:**
+- `listarViajes`: `jefe_operativo` y `administrador`, todos; `monitorista`, `supervisor` y `coordinador`, los viajes cuyo `cliente_id` está en sus clientes efectivos y que pasaron por `APROBADO` (nunca `SOLICITADO`, `RECHAZADO_POR_AI27` ni un viaje cancelado desde `SOLICITADO`). El filtro va en la consulta, antes del cursor. `ejecutivo` y `reaccion`, `403`. El Cliente, sin cambio.
+- `obtenerViaje` y toda ruta `/api/v1/viajes/{id}/...` (ficha, transiciones, ETA, fecha-hora, estadías, incidencias, bitácora, asignación, adjuntos, descargas) y los métodos equivalentes de la fachada: fuera de alcance `404`, antes de cualquier efecto. `ejecutivo`, `403`. `reaccion` lee `obtenerViaje` y `obtenerAsignacion` sin filtro (el `bff` compone su caso de emergencia) y recibe `403` en lo demás. `403` sigue siendo para la acción que el rol no tiene.
+- En un préstamo decide el cliente del viaje, no el de la unidad (DEC-149 #5). Un sujeto sin alcance proyectado no ve ningún viaje (falla cerrado).
+- `ASIGNADO → APTO_PARA_SALIDA`: ya lo ejecutaban el jefe y el monitoreo; queda probado (DEC-149 #7).
+- Unidad: `cliente_id` opcional en `crearUnidad`, `obtenerUnidad`, `listarUnidades` y la escolta. En `modificarUnidad`, ausente no lo toca y `null` lo quita. `400` si el cliente no existe o está inactivo en `catalogos`; con reserva vigente, `409 unidad_con_reserva_vigente`.
+- Proyección: `alcance.cambiado` (consumidor durable `operacion-alcance`) escribe `viajes.alcance_sujeto`; un alcance más viejo que el guardado no gana. Con `Deps.Alcances`, al arrancar se carga el snapshot de `listarAlcances` y su continuación por cursor (un item vacío quita al sujeto); el worker `operacion-alcance` es not-ready hasta converger.
+
+**Cambios:**
+- `go.mod`, `go.sum`: pin a `v0.1.0-tracer.41`.
+- `migrations/roster/0004_cliente_unidad.sql` (nuevo): `roster.unidad.cliente_id UUID NULL`.
+- `migrations/viajes/0006_alcance.sql` (nuevo): `viajes.alcance_sujeto` con `GRANT SELECT, INSERT, UPDATE` a `op_viajes`.
+- `internal/alcance/` (nuevo): regla pura (`Para`, `Visible`, `PasoPorAprobado` y su gemela SQL), proyección, consumidor y reconstrucción.
+- `ports.go`: puerto `Alcances` (`listarAlcances`, amplía DEC-051 por DEC-149 #20); `ObtenerCliente` en `AtomosCatalogo`. `adapters/http/alcances.go` (nuevo) y `ObtenerCliente` en `adapters/http/aptitud_recursos.go`.
+- `operacion.go`, `facultades.go`: `Deps.Alcances`, cableado del consumidor, guarda `exigirAlcance` / `enAlcance` en rutas y fachada, `listarViajes` por ámbito, lectura de `cliente_id: null`.
+- `internal/viajes/servicio.go`: `ListarDeClientes` y `HechosAlcance`. `internal/roster/`: `cliente_id` en el alta, la edición y la lectura (`GROUP BY u.id`). `internal/asignacion/servicio.go`: misma lectura en la escolta.
+- Pruebas: `internal/alcance/regla_test.go`, `cuerpo_test.go`, `alcance_integration_test.go`, `TestUnidadesClienteId`, `TestWorkersConSubscriberArrancaConsumidorAlcance`. Fixtures de `consultas_integration_test.go`: los roles de monitoreo reciben alcance sobre el viaje que operan; `moduloCompleto` cablea el pool de auditoría.
+
+**Pendiente en `pf-svc-core`:** implementar `ObtenerCliente` en el adaptador en proceso de `AtomosCatalogo`, pasar `Deps.Alcances` (la sub-fachada `Alcances()` de `identidad`) y el `Subscriber`, y aplicar la migración `viajes/0006` y `roster/0004`.
+
+**Verificación:** `gofmt` limpio, `go vet ./...`, `go build ./...`, `go build ./cmd/api`, `go test -count=1 -p 1 ./...` con `OPERACION_TEST_DB` en verde, `arch-test` v0.1.1. Mutantes (quitar la guarda HTTP, el filtro de cliente, el paso por `APROBADO`, el vaciado del snapshot, el orden por `cambiado_en`, la continuación por cursor, el caso de Reacción y la lectura de `null`) hacen fallar su prueba.
+
+**Archivos modificados:**
+- `go.mod`, `go.sum`, `.github/workflows/ci.yml`, `README.md`, `CHANGELOG.md`
+- `migrations/roster/0004_cliente_unidad.sql`, `migrations/viajes/0006_alcance.sql`
+- `internal/alcance/regla.go`, `internal/alcance/proyeccion.go`, `internal/alcance/consumidor.go`, `internal/alcance/reconstructor.go`, `internal/alcance/regla_test.go`
+- `ports.go`, `operacion.go`, `facultades.go`, `adapters/http/alcances.go`, `adapters/http/aptitud_recursos.go`
+- `internal/viajes/servicio.go`, `internal/roster/servicio.go`, `internal/roster/armado.go`, `internal/asignacion/servicio.go`, `internal/adjuntos/servicio.go`
+- `alcance_integration_test.go`, `cuerpo_test.go`, `consultas_integration_test.go`, `roster_integration_test.go`, `workers_test.go`
+
 ## 2026-11-09 12:10 — Alta, lectura y edición de unidades del roster (E8-T21, DEC-142)
 
 **Para quién:** el Jefe Operativo y el Administrador en la sección `/roster` del panel (vía `bff` y `pf-svc-core`). Hoy las unidades se siembran por SQL; ahora `operacion` arma el roster con las reglas de DEC-142. Para quien asigna escoltas: una unidad desactivada ya no se puede asignar. Para quien mantiene el servicio: una migración nueva en `roster`, un puerto nuevo hacia `catalogos` y un candado compartido entre el roster y la asignación.

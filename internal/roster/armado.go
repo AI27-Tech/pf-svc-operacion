@@ -122,7 +122,7 @@ func (s *Servicio) Modificar(ctx context.Context, id uuid.UUID, in operclient.Un
 			return nil, err
 		}
 	}
-	if in.ClienteId != nil && *in.ClienteId != QuitarCliente {
+	if in.ClienteId != nil && *in.ClienteId != uuid.Nil {
 		if err := s.verificarCliente(ctx, *in.ClienteId); err != nil {
 			return nil, err
 		}
@@ -182,7 +182,7 @@ func (s *Servicio) Modificar(ctx context.Context, id uuid.UUID, in operclient.Un
 		}
 		// $5 fija si se toca el cliente; $6 es el valor (NULL para quitarlo).
 		var cliente *uuid.UUID
-		if in.ClienteId != nil && *in.ClienteId != QuitarCliente {
+		if in.ClienteId != nil && *in.ClienteId != uuid.Nil {
 			cliente = in.ClienteId
 		}
 		if _, err := tx.Exec(ctx,

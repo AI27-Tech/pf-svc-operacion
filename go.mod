@@ -3,7 +3,8 @@ module github.com/AI27-Tech/pf-svc-operacion
 go 1.27
 
 // operacion es capa de dominio: su única arista síncrona saliente es hacia
-// catalogos (y la restringida a identidad para revocación, DEC-051). No importa
+// catalogos (y la restringida a identidad para revocación y el snapshot de
+// alcances, DEC-051 y DEC-149 #20). No importa
 // ningún otro pf-svc-*. Sin replace a rutas locales ni go.work versionado
 // (00 reglas 1 y 7).
 require (
