@@ -5,6 +5,7 @@ import (
 	"time"
 
 	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+	identidad "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/identidad"
 )
 
 // PresupuestoAptitud es el presupuesto de tiempo de la arista síncrona a
@@ -96,3 +97,23 @@ type Revocacion interface {
 // no es un número de negocio aprobado. Si debe configurarse por despliegue, pasa
 // a Deps/config conservando este valor como default.
 const PresupuestoRevocacion = 2 * time.Second
+
+// Alcances es la tercera operación de la arista RESTRINGIDA hacia identidad:
+// listarAlcances, el snapshot con cursor de los clientes efectivos por sujeto
+// con el que operacion reconstruye su proyección de alcance.cambiado al
+// arrancar (DEC-149 #20, patrón ADR 26). AMPLÍA DEC-051 (que restringía la
+// arista a listarRevocadas y obtenerSesion) por DEC-149 #20; la regla
+// restricted_edges de pf-pkg-platform-go/tools/arch-test/reglas.yaml debe
+// listarla. Es un puerto hermano de Revocacion, y no un método más, para no
+// romper los adaptadores de revocación existentes.
+//
+// Tipado con el contrato para que core pase directamente la sub-fachada
+// Alcances() de identidad (adaptador en proceso, en pf-svc-core). El HTTP vive
+// en adapters/http/. El presupuesto de tiempo lo aplica quien llama (la
+// reconstrucción), así ambos adaptadores lo comparten (I3).
+//
+// Sin cursor: el snapshot (solo sujetos con algún cliente). Con el cursor
+// devuelto: lo que cambió después, y un item con la lista vacía quita al sujeto.
+type Alcances interface {
+	ListarAlcances(ctx context.Context, params identidad.ListarAlcancesParams) (*identidad.PaginaAlcances, error)
+}
