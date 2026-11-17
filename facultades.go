@@ -2,11 +2,15 @@ package operacion
 
 import (
 	"context"
+	"net/http"
 	"slices"
 
+	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/roles"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/alcance"
+	"github.com/google/uuid"
 )
 
 // facultades fija, por operationId, qué roles pueden invocar las operaciones del
@@ -62,4 +66,63 @@ func exigirFacultadInterna(ctx context.Context, op string) error {
 		return platformerrors.NewNoEncontrado("operacion: %s: recurso no encontrado", op)
 	}
 	return exigirFacultad(ctx, op)
+}
+
+// exigirAlcance es la guarda única del alcance sobre un viaje (DEC-149,
+// operacion.yaml de tracer.41). La corren, antes de cualquier efecto, todas las
+// rutas /api/v1/viajes/{id}/... (enAlcance) y los métodos de la fachada que
+// operan sobre un viaje (I3).
+//
+//   - Sin claims (llamada de sistema dentro de core) o audiencia Cliente: no
+//     acota; al Cliente lo acota su tenant en cada caso de uso (DEC-112).
+//   - Rol sin la acción (ejecutivo; reaccion fuera de su caso; rol desconocido): 403.
+//   - jefe_operativo, administrador: todos.
+//   - monitorista, supervisor, coordinador: el viaje debe ser de sus clientes
+//     efectivos (proyección de alcance.cambiado) y haber pasado por APROBADO;
+//     si no, 404 igual que si no existiera.
+//
+// shortcut: el sujeto de la proyección es claims.Subject, pero DEC-072 hace
+// del `sub` un id opaco del IdP distinto del sujeto_id de identidad que traen
+// alcance.cambiado y listarAlcances. Mientras el contrato no dé la
+// correspondencia, con un IdP real nadie del monitoreo ve viajes (falla
+// cerrado). Decisión técnica a revisar en el PR.
+func (m *Module) exigirAlcance(ctx context.Context, id operclient.Id, a alcance.Acceso) error {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil || claims.Audiencia == auth.AudienciaCliente {
+		return nil
+	}
+	switch alcance.Para(claims.Rol, a) {
+	case alcance.Todos:
+		return nil
+	case alcance.PorClientes:
+		clientes, err := m.alcance.Clientes(ctx, claims.Subject)
+		if err != nil {
+			return err
+		}
+		h, err := m.viajes.HechosAlcance(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !alcance.Visible(clientes, h) {
+			return platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+		}
+		return nil
+	}
+	return platformerrors.NewProhibido("operacion: el rol %q no opera sobre viajes", claims.Rol)
+}
+
+// enAlcance envuelve una ruta /api/v1/viajes/{id}/... con exigirAlcance.
+func (m *Module) enAlcance(a alcance.Acceso, h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
+			return
+		}
+		if err := m.exigirAlcance(r.Context(), id, a); err != nil {
+			escribirError(w, err)
+			return
+		}
+		h(w, r)
+	})
 }
