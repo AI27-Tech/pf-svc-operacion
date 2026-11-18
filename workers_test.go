@@ -134,6 +134,7 @@ type suscripcion struct {
 	durableName string
 	superficie  bus.Sensibilidad
 	filtro      []string
+	h           bus.Handler
 }
 
 type suscriptorFake struct {
@@ -141,7 +142,7 @@ type suscriptorFake struct {
 }
 
 func (s *suscriptorFake) Subscribe(durableName string, superficie bus.Sensibilidad, filtroTipos []string, h bus.Handler) (worker.Worker, error) {
-	s.subs = append(s.subs, suscripcion{durableName, superficie, filtroTipos})
+	s.subs = append(s.subs, suscripcion{durableName, superficie, filtroTipos, h})
 	return workerConNombre{nombre: "bus-durable:" + durableName}, nil
 }
 
@@ -271,4 +272,41 @@ func TestWorkersConSubscriberArrancaConsumidorEmergencia(t *testing.T) {
 	if !tiene {
 		t.Error("falta el consumidor de emergencia en Workers()")
 	}
+}
+
+// TestWorkersConSubscriberArrancaConsumidorAlcance fija el cableado de la
+// proyección de alcance (DEC-149 #20): con Subscriber, un consumidor durable de
+// alcance.cambiado; con Alcances además, envuelto por la reconstrucción, que
+// arranca not-ready.
+func TestWorkersConSubscriberArrancaConsumidorAlcance(t *testing.T) {
+	sub := &suscriptorFake{}
+	m, err := operacion.New(operacion.Pools{}, operacion.Deps{Subscriber: sub})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	s := sub.buscar("operacion-alcance")
+	if s == nil || len(s.filtro) != 1 || s.filtro[0] != "alcance.cambiado" || s.superficie != bus.SensibilidadAmplia {
+		t.Fatalf("suscripción: %+v; quiere operacion-alcance a alcance.cambiado, amplia", s)
+	}
+	nombres := map[string]bool{}
+	for _, w := range m.Workers() {
+		nombres[w.Name()] = true
+	}
+	if !nombres["bus-durable:operacion-alcance"] {
+		t.Errorf("sin Alcances: workers %v; quiere el consumidor desnudo", nombres)
+	}
+
+	m, err = operacion.New(operacion.Pools{}, operacion.Deps{Subscriber: &suscriptorFake{}, Alcances: &alcancesFake{}})
+	if err != nil {
+		t.Fatalf("New con Alcances: %v", err)
+	}
+	for _, w := range m.Workers() {
+		if w.Name() == "operacion-alcance" {
+			if w.Ready(context.Background()) == nil {
+				t.Error("reconstrucción sin correr: Ready nil; quiere not-ready")
+			}
+			return
+		}
+	}
+	t.Error("con Alcances: falta el worker operacion-alcance")
 }

@@ -15,6 +15,7 @@ import (
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-svc-operacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/dbtest"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/roster"
 	"github.com/google/uuid"
 )
 
@@ -25,9 +26,29 @@ type atomosFake struct {
 	mu        sync.Mutex
 	vehiculos map[uuid.UUID]catalogos.Vehiculo
 	custodios map[uuid.UUID]catalogos.Custodio
+	clientes  map[uuid.UUID]catalogos.Cliente
 }
 
-var catalogo = &atomosFake{vehiculos: map[uuid.UUID]catalogos.Vehiculo{}, custodios: map[uuid.UUID]catalogos.Custodio{}}
+var catalogo = &atomosFake{vehiculos: map[uuid.UUID]catalogos.Vehiculo{}, custodios: map[uuid.UUID]catalogos.Custodio{}, clientes: map[uuid.UUID]catalogos.Cliente{}}
+
+func (f *atomosFake) ObtenerCliente(_ context.Context, id catalogos.Id) (*catalogos.Cliente, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.clientes[id]
+	if !ok {
+		return nil, platformerrors.NewNoEncontrado("catalogos: recurso no encontrado")
+	}
+	return &c, nil
+}
+
+// cliente da de alta un cliente con el estado dado y devuelve su id.
+func (f *atomosFake) cliente(estado catalogos.ClienteEstado) uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	id := uuid.New()
+	f.clientes[id] = catalogos.Cliente{Id: id, Nombre: "cliente", Estado: estado}
+	return id
+}
 
 func (f *atomosFake) ObtenerVehiculo(_ context.Context, id catalogos.Id) (*catalogos.Vehiculo, error) {
 	f.mu.Lock()
@@ -460,5 +481,91 @@ func TestUnidadesAsignarSoloActivas(t *testing.T) {
 	}
 	if _, err := api.AsignarRecursos(ctxJefe, viaje, operclient.AsignacionEntrada{UnidadesIds: ids(u.Id)}); err != nil {
 		t.Errorf("asignar la unidad reactivada: %v", err)
+	}
+}
+
+// TestUnidadesClienteId: el cliente al que sirve la unidad (DEC-149 #2, #13) se
+// fija al crear, se lee en obtener y listar, y en modificarUnidad ausente no lo
+// toca y `null` lo quita (HTTP; la fachada usa &roster.QuitarCliente). Un
+// cliente inexistente o inactivo es 400. Con reserva vigente, cambiarlo o
+// quitarlo es 409 unidad_con_reserva_vigente (DEC-142 #5).
+func TestUnidadesClienteId(t *testing.T) {
+	ctx := context.Background()
+	m := moduloCompleto(t, ctx)
+	api := m.Consultas()
+	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
+	cA, cB := catalogo.cliente(catalogos.ClienteEstadoActivo), catalogo.cliente(catalogos.ClienteEstadoActivo)
+	inactivo := catalogo.cliente(catalogos.ClienteEstadoInactivo)
+
+	// Alta con cliente por HTTP; sin cliente queda null.
+	rec := pedir(m, http.MethodPost, "/api/v1/unidades",
+		`{"vehiculo_id":"`+coche().String()+`","custodios_ids":["`+custodio().String()+`"],"cliente_id":"`+cA.String()+`"}`, "x")
+	var u operclient.Unidad
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &u) != nil || u.ClienteId == nil || *u.ClienteId != cA {
+		t.Fatalf("HTTP alta con cliente: status %d cuerpo %s; quiere 201 con cliente_id %s", rec.Code, rec.Body, cA)
+	}
+	sin := crear(t, api, coche(), custodio())
+	if sin.ClienteId != nil {
+		t.Errorf("alta sin cliente: cliente_id %v; quiere null", sin.ClienteId)
+	}
+	if got, err := api.ObtenerUnidad(ctxJefe, u.Id); err != nil || got.ClienteId == nil || *got.ClienteId != cA {
+		t.Errorf("obtener: %+v err %v; quiere cliente_id %s", got, err, cA)
+	}
+	pag, err := api.ListarUnidades(ctxJefe, operclient.ListarUnidadesParams{})
+	if err != nil {
+		t.Fatalf("listar: %v", err)
+	}
+	var listada *operclient.Unidad
+	for i := range pag.Items {
+		if pag.Items[i].Id == u.Id {
+			listada = &pag.Items[i]
+		}
+	}
+	if listada == nil || listada.ClienteId == nil || *listada.ClienteId != cA {
+		t.Errorf("listar: unidad %+v; quiere cliente_id %s", listada, cA)
+	}
+
+	// 400: inexistente o inactivo, al crear y al modificar.
+	for caso, cid := range map[string]uuid.UUID{"inexistente": uuid.New(), "inactivo": inactivo} {
+		_, err := api.CrearUnidad(ctxJefe, operclient.UnidadEntrada{VehiculoId: coche(), CustodiosIds: ids(custodio()), ClienteId: ptr(cid)})
+		quiere400(t, err, "crear con cliente "+caso)
+		_, err = api.ModificarUnidad(ctxJefe, u.Id, operclient.UnidadModificacion{ClienteId: ptr(cid)})
+		quiere400(t, err, "modificar con cliente "+caso)
+	}
+
+	// Ausente no lo toca; otro valor lo cambia; null lo quita (HTTP).
+	if rec := pedir(m, http.MethodPatch, "/api/v1/unidades/"+u.Id.String(), `{"activa":true}`, "x"); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"cliente_id":"`+cA.String()+`"`) {
+		t.Errorf("PATCH sin cliente_id: status %d cuerpo %s; quiere el cliente intacto", rec.Code, rec.Body)
+	}
+	if got, err := api.ModificarUnidad(ctxJefe, u.Id, operclient.UnidadModificacion{ClienteId: ptr(cB)}); err != nil || got.ClienteId == nil || *got.ClienteId != cB {
+		t.Errorf("cambiar cliente: %+v err %v; quiere %s", got, err, cB)
+	}
+	if rec := pedir(m, http.MethodPatch, "/api/v1/unidades/"+u.Id.String(), `{"cliente_id":null}`, "x"); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"cliente_id":null`) {
+		t.Errorf("PATCH cliente_id null: status %d cuerpo %s; quiere el cliente quitado", rec.Code, rec.Body)
+	}
+	if got, err := api.ModificarUnidad(ctxJefe, sin.Id, operclient.UnidadModificacion{ClienteId: ptr(cA)}); err != nil || got.ClienteId == nil {
+		t.Fatalf("fijar cliente: %+v err %v", got, err)
+	}
+	if got, err := api.ModificarUnidad(ctxJefe, sin.Id, operclient.UnidadModificacion{ClienteId: &roster.QuitarCliente}); err != nil || got.ClienteId != nil {
+		t.Errorf("fachada quitar cliente: %+v err %v; quiere null", got, err)
+	}
+
+	// Con reserva vigente no se cambia ni se quita el cliente.
+	if _, err := api.ModificarUnidad(ctxJefe, u.Id, operclient.UnidadModificacion{ClienteId: ptr(cA)}); err != nil {
+		t.Fatalf("fijar cliente antes de reservar: %v", err)
+	}
+	if _, err := api.AsignarRecursos(ctxJefe, viajeAprobado(t, ctx, api), operclient.AsignacionEntrada{UnidadesIds: ids(u.Id)}); err != nil {
+		t.Fatalf("asignar: %v", err)
+	}
+	_, err = api.ModificarUnidad(ctxJefe, u.Id, operclient.UnidadModificacion{ClienteId: ptr(cB)})
+	quiereCodigo(t, err, "unidad_con_reserva_vigente")
+	if rec := pedir(m, http.MethodPatch, "/api/v1/unidades/"+u.Id.String(), `{"cliente_id":null}`, "x"); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), `"codigo":"unidad_con_reserva_vigente"`) {
+		t.Errorf("HTTP quitar cliente reservada: status %d cuerpo %s; quiere 409 unidad_con_reserva_vigente", rec.Code, rec.Body)
+	}
+	if got, err := api.ObtenerUnidad(ctxJefe, u.Id); err != nil || got.ClienteId == nil || *got.ClienteId != cA {
+		t.Errorf("unidad reservada intacta: %+v err %v; quiere cliente %s", got, err, cA)
 	}
 }

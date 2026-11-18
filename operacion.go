@@ -9,7 +9,8 @@
 // repartirlos entre servicios convierte la asignación en sagas que sobrevenden.
 //
 // Capa de dominio. Arista síncrona saliente: una sola, hacia catalogos (y la
-// restringida a identidad para revocación, DEC-051). No llama a mensajeria,
+// restringida a identidad para revocación y el snapshot de alcances, DEC-051 y
+// DEC-149 #20). No llama a mensajeria,
 // reportes, realtime ni procesamiento: todo les llega por evento.
 //
 // Vive en el deployable `core`; cmd/api solo existe para arranque standalone
@@ -36,6 +37,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-platform-go/pgxpool"
 	"github.com/AI27-Tech/pf-pkg-platform-go/worker"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/adjuntos"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/alcance"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/asignacion"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/autorizacion"
@@ -71,6 +73,12 @@ type Deps struct {
 	// Revocacion es la arista restringida a identidad (DEC-051). Opcional en el
 	// esqueleto; sin ella, la autorización corre sin proyección de tombstones.
 	Revocacion Revocacion
+	// Alcances es listarAlcances de identidad (DEC-149 #20): reconstruye al
+	// arrancar la proyección de alcance.cambiado. Solo se usa con Subscriber. Sin
+	// ella el consumidor arranca sin snapshot; sin Subscriber no hay proyección
+	// viva y monitorista, supervisor y coordinador no ven ningún viaje (falla
+	// cerrado).
+	Alcances Alcances
 	// Verificador autentica las rutas protegidas que operacion monta por sí misma
 	// (como bff): la interfaz común Routes(mux) no lleva verificador, así que el
 	// módulo se autentica solo. Si es nil, no se monta ninguna ruta protegida (no
@@ -129,6 +137,13 @@ type Module struct {
 	// consumidorCatalogos es el worker durable de catalogo.actualizado que
 	// invalida la caché de aptitud (E5-T5). nil sin Subscriber.
 	consumidorCatalogos worker.Worker
+	// alcance es la proyección de alcance.cambiado (sujeto → clientes efectivos,
+	// DEC-149) en viajes.alcance_sujeto. La leen las guardas de alcance; la
+	// escribe consumidorAlcance. Siempre existe: sin consumidor queda vacía.
+	alcance *alcance.Proyeccion
+	// consumidorAlcance es el worker durable de alcance.cambiado, envuelto por la
+	// reconstrucción con listarAlcances si hay Deps.Alcances. nil sin Subscriber.
+	consumidorAlcance worker.Worker
 	// consumidorEmergencia es el worker durable de emergencia.nota_agregada que
 	// proyecta cada nota de emergencia al histórico/bitácora del viaje (E7,
 	// tracer.17, DEC-100). nil sin Subscriber.
@@ -168,6 +183,8 @@ func New(p Pools, d Deps) (*Module, error) {
 		// Consulta de la auditoría probatoria para componer la descarga (E6-T3).
 		// Lee con op_auditoria (SELECT sobre registro_auditoria); no escribe.
 		auditoriaConsulta: auditoria.NewServicioConsulta(p.Auditoria),
+		// Proyección de alcance en el esquema viajes, con op_viajes (DEC-149).
+		alcance: alcance.NuevaProyeccion(p.Viajes),
 	}
 	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
@@ -227,6 +244,26 @@ func New(p Pools, d Deps) (*Module, error) {
 		}
 		m.consumidorCatalogos = w
 	}
+	// Consumidor durable de alcance.cambiado (DEC-149 #20): mantiene la
+	// proyección en Postgres, compartida por las réplicas. Con Alcances, la
+	// reconstrucción por snapshot + cursor lo envuelve y deja la réplica
+	// not-ready hasta converger (patrón ADR 26 §4).
+	if d.Subscriber != nil {
+		cons := alcance.NuevoConsumidor(m.alcance)
+		w, err := d.Subscriber.Subscribe(
+			"operacion-alcance",
+			bus.SensibilidadAmplia,
+			[]string{alcance.TipoAlcanceCambiado},
+			cons.Procesar,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if d.Alcances != nil {
+			w = alcance.NuevoReconstructor(w, d.Alcances, m.alcance)
+		}
+		m.consumidorAlcance = w
+	}
 	// Consumidor durable de emergencia.nota_agregada (E7, tracer.17, DEC-100):
 	// proyecta cada nota de emergencia al histórico/bitácora del viaje. Primer
 	// consumidor durable RESTRINGIDO de operacion (el evento viaja por el tema
@@ -277,41 +314,43 @@ func (m *Module) Routes(mux *http.ServeMux) {
 		rev = m.revocacion
 	}
 	protegido := auth.Middleware(m.deps.Verificador, rev)
-	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(http.HandlerFunc(m.handleTransicionar)))
-	mux.Handle("GET /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleObtenerAsignacion)))
-	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleAsignar)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(http.HandlerFunc(m.handleReasignar)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(http.HandlerFunc(m.handleFijarEta)))
-	mux.Handle("POST /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleRegistrarBitacora)))
-	mux.Handle("GET /api/v1/viajes/{id}/bitacora", protegido(http.HandlerFunc(m.handleListarBitacora)))
+	// Toda ruta /api/v1/viajes/{id}/... pasa por la guarda de alcance (DEC-149)
+	// antes de cualquier efecto: fuera de alcance 404, rol sin la acción 403.
+	mux.Handle("POST /api/v1/viajes/{id}/transiciones", protegido(m.enAlcance(alcance.Subrecurso, m.handleTransicionar)))
+	mux.Handle("GET /api/v1/viajes/{id}/asignacion", protegido(m.enAlcance(alcance.Caso, m.handleObtenerAsignacion)))
+	mux.Handle("POST /api/v1/viajes/{id}/asignacion", protegido(m.enAlcance(alcance.Subrecurso, m.handleAsignar)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/asignacion", protegido(m.enAlcance(alcance.Subrecurso, m.handleReasignar)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/eta", protegido(m.enAlcance(alcance.Subrecurso, m.handleFijarEta)))
+	mux.Handle("POST /api/v1/viajes/{id}/bitacora", protegido(m.enAlcance(alcance.Subrecurso, m.handleRegistrarBitacora)))
+	mux.Handle("GET /api/v1/viajes/{id}/bitacora", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarBitacora)))
 	// Condiciones ortogonales (E1-T6): incidencias y estadías. Abrir/cerrar
 	// NINGUNA cambia viaje.estado (§C.2). Los sirve el módulo viajes (dueño de
 	// condicion_viaje y de la nueva tabla estadia, mismo rol op_viajes).
-	mux.Handle("POST /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleAbrirIncidencia)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/incidencias/{iid}", protegido(http.HandlerFunc(m.handleResolverIncidencia)))
-	mux.Handle("POST /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleAbrirEstadia)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/estadias/{eid}", protegido(http.HandlerFunc(m.handleCerrarEstadia)))
-	mux.Handle("GET /api/v1/viajes/{id}/estadias", protegido(http.HandlerFunc(m.handleListarEstadias)))
+	mux.Handle("POST /api/v1/viajes/{id}/incidencias", protegido(m.enAlcance(alcance.Subrecurso, m.handleAbrirIncidencia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/incidencias/{iid}", protegido(m.enAlcance(alcance.Subrecurso, m.handleResolverIncidencia)))
+	mux.Handle("POST /api/v1/viajes/{id}/estadias", protegido(m.enAlcance(alcance.Subrecurso, m.handleAbrirEstadia)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/estadias/{eid}", protegido(m.enAlcance(alcance.Subrecurso, m.handleCerrarEstadia)))
+	mux.Handle("GET /api/v1/viajes/{id}/estadias", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarEstadias)))
 	// Descarga del expediente (AI27-80, E1-T7): bff compone la descarga e invoca a
 	// operacion para DEJAR el rastro de auditoría (el rastro lo escribe operacion
 	// en su transacción, no el bff). Sin cuerpo; responde el Viaje descargado.
-	mux.Handle("POST /api/v1/viajes/{id}/descargas", protegido(http.HandlerFunc(m.handleRegistrarDescarga)))
+	mux.Handle("POST /api/v1/viajes/{id}/descargas", protegido(m.enAlcance(alcance.Subrecurso, m.handleRegistrarDescarga)))
 	// Evidencia del viaje (E6-T4 / E6-HU-027): listar metadatos, crear la
 	// intención de subida (URL de vida corta) y autorizar la descarga. Los bytes
 	// no pasan por operacion; cada acceso queda auditado (E1-T7).
-	mux.Handle("GET /api/v1/viajes/{id}/adjuntos", protegido(http.HandlerFunc(m.handleListarAdjuntos)))
-	mux.Handle("POST /api/v1/viajes/{id}/adjuntos/intenciones-subida", protegido(http.HandlerFunc(m.handleCrearIntencionSubidaAdjunto)))
-	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(http.HandlerFunc(m.handleDescargarAdjunto)))
+	mux.Handle("GET /api/v1/viajes/{id}/adjuntos", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarAdjuntos)))
+	mux.Handle("POST /api/v1/viajes/{id}/adjuntos/intenciones-subida", protegido(m.enAlcance(alcance.Subrecurso, m.handleCrearIntencionSubidaAdjunto)))
+	mux.Handle("GET /api/v1/viajes/{id}/adjuntos/{aid}/descarga", protegido(m.enAlcance(alcance.Subrecurso, m.handleDescargarAdjunto)))
 	// Flujo interno del panel (E8-T9/T10/T12/T13): roster para asignar la escolta.
 	mux.Handle("GET /api/v1/unidades", protegido(http.HandlerFunc(m.handleListarUnidades)))
 	// Armado del roster (E8-T21, DEC-142).
 	mux.Handle("POST /api/v1/unidades", protegido(http.HandlerFunc(m.handleCrearUnidad)))
 	mux.Handle("GET /api/v1/unidades/{id}", protegido(http.HandlerFunc(m.handleObtenerUnidad)))
 	mux.Handle("PATCH /api/v1/unidades/{id}", protegido(http.HandlerFunc(m.handleModificarUnidad)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleCompletarFechaHora)))
-	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(http.HandlerFunc(m.handleListarIncidencias)))
-	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(http.HandlerFunc(m.handleObtenerFicha)))
-	mux.Handle("PATCH /api/v1/viajes/{id}/ficha", protegido(http.HandlerFunc(m.handleGuardarFicha)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/fecha-hora", protegido(m.enAlcance(alcance.Subrecurso, m.handleCompletarFechaHora)))
+	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarIncidencias)))
+	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleObtenerFicha)))
+	mux.Handle("PATCH /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleGuardarFicha)))
 }
 
 // handleObtenerFicha atiende GET /api/v1/viajes/{id}/ficha.
@@ -339,23 +378,14 @@ func (m *Module) handleGuardarFicha(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: id de viaje inválido"))
 		return
 	}
-	raw, err := io.ReadAll(r.Body)
-	if err != nil {
-		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
-		return
-	}
 	var body operclient.FichaTecnicaEntrada
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
+	raw, err := leerEstricto(r, &body)
+	if err != nil {
+		escribirError(w, err)
 		return
 	}
-	if body.Tracto == nil {
-		var props map[string]json.RawMessage
-		if json.Unmarshal(raw, &props) == nil && string(bytes.TrimSpace(props["tracto"])) == "null" {
-			body.Tracto = &operclient.Tracto{}
-		}
+	if body.Tracto == nil && campoNulo(raw, "tracto") {
+		body.Tracto = &operclient.Tracto{}
 	}
 	f, err := m.guardarFicha(r.Context(), id, body)
 	if err != nil {
@@ -495,15 +525,17 @@ func (m *Module) handleObtenerUnidad(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModificarUnidad atiende PATCH /api/v1/unidades/{id}; mismo decodificado
-// estricto que el alta.
+// estricto que el alta. Como en la ficha, el tipo generado no distingue
+// `"cliente_id": null` (quitar el cliente) de la propiedad ausente (no tocarlo):
+// el handler lo lee en el JSON crudo y lo pasa como &roster.QuitarCliente.
 func (m *Module) handleModificarUnidad(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		escribirError(w, platformerrors.NewValidacion("operacion: id de unidad inválido"))
 		return
 	}
-	var body operclient.UnidadModificacion
-	if err := decodificarEstricto(r, &body); err != nil {
+	body, err := leerUnidadModificacion(r)
+	if err != nil {
 		escribirError(w, err)
 		return
 	}
@@ -515,14 +547,43 @@ func (m *Module) handleModificarUnidad(w http.ResponseWriter, r *http.Request) {
 	escribirJSON(w, http.StatusOK, u)
 }
 
+// leerUnidadModificacion decodifica el PATCH de una unidad: `"cliente_id": null`
+// llega como &roster.QuitarCliente; ausente, como nil (DEC-149 #2).
+func leerUnidadModificacion(r *http.Request) (operclient.UnidadModificacion, error) {
+	var body operclient.UnidadModificacion
+	raw, err := leerEstricto(r, &body)
+	if err == nil && body.ClienteId == nil && campoNulo(raw, "cliente_id") {
+		body.ClienteId = &roster.QuitarCliente
+	}
+	return body, err
+}
+
 // decodificarEstricto lee el cuerpo JSON rechazando propiedades desconocidas (400).
 func decodificarEstricto(r *http.Request, v any) error {
-	dec := json.NewDecoder(r.Body)
+	_, err := leerEstricto(r, v)
+	return err
+}
+
+// leerEstricto es decodificarEstricto que además devuelve el cuerpo crudo, para
+// los PATCH que distinguen `null` de una propiedad ausente (campoNulo).
+func leerEstricto(r *http.Request, v any) ([]byte, error) {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		return platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+		return nil, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
 	}
-	return nil
+	return raw, nil
+}
+
+// campoNulo dice si el objeto JSON raw trae la propiedad campo con valor null.
+// Ausente no es null: es "no tocar" en un PATCH.
+func campoNulo(raw []byte, campo string) bool {
+	var props map[string]json.RawMessage
+	return json.Unmarshal(raw, &props) == nil && string(bytes.TrimSpace(props[campo])) == "null"
 }
 
 // crearUnidad, obtenerUnidad y modificarUnidad aplican la facultad (DEC-142 #3)
@@ -984,8 +1045,12 @@ func escribirError(w http.ResponseWriter, err error) {
 // durable de catalogo.actualizado cuando la raíz inyectó el Subscriber (E5-T5):
 // invalida la caché en proceso de aptitud. El consumidor durable de
 // sesion.revocada sigue por el canal de difusión (Broadcaster), no por el
-// Subscriber. Sin BusPublisher ni Subscriber ni Broadcaster, la lista va vacía
-// (arranque standalone sin bus).
+// Subscriber. Con Subscriber también arranca el de alcance.cambiado (DEC-149
+// #20), cuyo efecto es durable en viajes.alcance_sujeto e idempotente por
+// construcción (snapshot ordenado por cambiado_en); con Deps.Alcances va
+// envuelto por la reconstrucción y su Ready es not-ready hasta converger. Sin
+// BusPublisher ni Subscriber ni Broadcaster, la lista va vacía (arranque
+// standalone sin bus).
 func (m *Module) Workers() []worker.Worker {
 	var ws []worker.Worker
 	if m.relay != nil {
@@ -999,6 +1064,9 @@ func (m *Module) Workers() []worker.Worker {
 	}
 	if m.consumidorEmergencia != nil {
 		ws = append(ws, m.consumidorEmergencia)
+	}
+	if m.consumidorAlcance != nil {
+		ws = append(ws, m.consumidorAlcance)
 	}
 	return ws
 }
@@ -1066,6 +1134,10 @@ type ConsultasAPI interface {
 	// DEC-142). Solo jefe_operativo y administrador; otro rol interno 403, el
 	// Cliente 404. Rechazos 409 con código: vehiculo_en_otra_unidad,
 	// custodio_en_otra_unidad y (al modificar) unidad_con_reserva_vigente.
+	// cliente_id (DEC-149 #2): 400 si no existe o está inactivo en catalogos. En
+	// ModificarUnidad, ClienteId nil no toca el cliente y &uuid.Nil lo quita:
+	// quien recibe el JSON traduce `"cliente_id": null` a &uuid.Nil antes de
+	// llamar (el tipo generado no distingue null de ausente).
 	CrearUnidad(ctx context.Context, body operclient.UnidadEntrada) (*operclient.Unidad, error)
 	ObtenerUnidad(ctx context.Context, id operclient.Id) (*operclient.Unidad, error)
 	ModificarUnidad(ctx context.Context, id operclient.Id, body operclient.UnidadModificacion) (*operclient.Unidad, error)
@@ -1101,17 +1173,40 @@ func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEn
 	return c.m.viajes.Crear(ctx, body, claims.Rol, claims.TenantID)
 }
 
+// ListarViajes acota la lista al alcance del llamante (DEC-149): Cliente, su
+// tenant; jefe_operativo y administrador, todos; monitoreo, sus clientes
+// efectivos desde APROBADO (filtro en la consulta, no en memoria: el cursor
+// sigue siendo correcto); ejecutivo, reaccion y un rol desconocido, 403. Sin
+// claims (llamada de sistema en core) no se acota.
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
 	if tenant, ok := tenantDeCliente(ctx); ok {
 		return c.m.viajes.ListarDeCliente(ctx, params, tenant)
 	}
-	return c.m.viajes.Listar(ctx, params)
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return c.m.viajes.Listar(ctx, params)
+	}
+	switch alcance.Para(claims.Rol, alcance.Lista) {
+	case alcance.Todos:
+		return c.m.viajes.Listar(ctx, params)
+	case alcance.PorClientes:
+		clientes, err := c.m.alcance.Clientes(ctx, claims.Subject)
+		if err != nil {
+			return nil, err
+		}
+		return c.m.viajes.ListarDeClientes(ctx, params, clientes)
+	}
+	return nil, platformerrors.NewProhibido("operacion: el rol %q no lista viajes", claims.Rol)
 }
 
-// ObtenerViaje acota el detalle al viaje del propio cliente (tenant == cliente_id,
-// DEC-112). Un viaje ajeno responde 404, no 403, para no confirmar que existe
-// (DEC-132).
+// ObtenerViaje aplica el alcance del viaje (exigirAlcance: monitoreo fuera de
+// alcance 404, ejecutivo 403, reaccion lee su caso) y acota el detalle al viaje
+// del propio cliente (tenant == cliente_id, DEC-112). Un viaje ajeno responde
+// 404, no 403, para no confirmar que existe (DEC-132).
 func (c *consultas) ObtenerViaje(ctx context.Context, id operclient.Id) (*operclient.ViajeDetalle, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Caso); err != nil {
+		return nil, err
+	}
 	det, err := c.m.viajes.Obtener(ctx, id)
 	if err != nil {
 		return nil, err
@@ -1135,11 +1230,17 @@ func tenantDeCliente(ctx context.Context) (string, bool) {
 // ListarBitacora reenvía al caso de uso de bitácora (mismo que el handler HTTP,
 // I3). El cursor ya viene armado en params.
 func (c *consultas) ListarBitacora(ctx context.Context, id operclient.Id, params operclient.ListarBitacoraParams) (*operclient.PaginaBitacora, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.bitacora.ListarBitacora(ctx, id, params)
 }
 
 // ConsultarAuditoria reenvía al servicio de consulta de auditoría (op_auditoria).
 func (c *consultas) ConsultarAuditoria(ctx context.Context, id operclient.Id, params operclient.ConsultarAuditoriaParams) (*operclient.PaginaAuditoria, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.auditoriaConsulta.Consultar(ctx, id, params)
 }
 
@@ -1147,6 +1248,9 @@ func (c *consultas) ConsultarAuditoria(ctx context.Context, id operclient.Id, pa
 // actor sale de los claims del ctx (igual que el handler HTTP, I3); nil-safe:
 // sin claims el actor queda vacío (autor_id NULL), no es error.
 func (c *consultas) RegistrarDescargaViaje(ctx context.Context, id operclient.Id) (*operclient.Viaje, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	var actor string
 	if claims := auth.ClaimsFromContext(ctx); claims != nil {
 		actor = claims.Subject
@@ -1159,6 +1263,9 @@ func (c *consultas) RegistrarDescargaViaje(ctx context.Context, id operclient.Id
 // claims es error: la guarda del cierre exige el rol y el aislamiento de cliente
 // la audiencia/tenant, y un actor vacío no debe pasar como si fuera interno.
 func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, body operclient.TransicionEntrada) (*operclient.Viaje, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: transicionarViaje sin claims en el contexto")
@@ -1169,11 +1276,17 @@ func (c *consultas) TransicionarViaje(ctx context.Context, id operclient.Id, bod
 // ObtenerAsignacion comparte la guarda y el caso de uso con
 // handleObtenerAsignacion (I3).
 func (c *consultas) ObtenerAsignacion(ctx context.Context, id operclient.Id) (*operclient.EscoltaVigente, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Caso); err != nil {
+		return nil, err
+	}
 	return c.m.escolta(ctx, id)
 }
 
 // ListarAdjuntos reenvía al mismo caso de uso que handleListarAdjuntos (I3).
 func (c *consultas) ListarAdjuntos(ctx context.Context, id operclient.Id) (*operclient.PaginaAdjuntos, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.adjuntos.Listar(ctx, id)
 }
 
@@ -1181,6 +1294,9 @@ func (c *consultas) ListarAdjuntos(ctx context.Context, id operclient.Id) (*oper
 // claims del ctx; nil-safe: sin claims el actor queda vacío (autor del rastro
 // NULL), no es error, igual que RegistrarDescargaViaje.
 func (c *consultas) CrearIntencionSubidaAdjunto(ctx context.Context, id operclient.Id, body operclient.IntencionSubidaAdjuntoEntrada) (*operclient.IntencionSubidaAdjunto, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	var actor string
 	if claims := auth.ClaimsFromContext(ctx); claims != nil {
 		actor = claims.Subject
@@ -1190,6 +1306,9 @@ func (c *consultas) CrearIntencionSubidaAdjunto(ctx context.Context, id operclie
 
 // DescargarAdjunto reenvía al caso de uso (I3). El actor sale de los claims del ctx.
 func (c *consultas) DescargarAdjunto(ctx context.Context, id, aid operclient.Id) (*operclient.DescargaAdjunto, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	var actor string
 	if claims := auth.ClaimsFromContext(ctx); claims != nil {
 		actor = claims.Subject
@@ -1199,12 +1318,18 @@ func (c *consultas) DescargarAdjunto(ctx context.Context, id, aid operclient.Id)
 
 // FijarEta delega en el mismo caso de uso que handleFijarEta (I3). No usa actor.
 func (c *consultas) FijarEta(ctx context.Context, id operclient.Id, body operclient.EtaEntrada) (*operclient.Viaje, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.viajes.FijarEta(ctx, id, body)
 }
 
 // AsignarRecursos delega en el mismo caso de uso que handleAsignar (I3). Sin
 // claims es error: el actor queda en la auditoría probatoria de la asignación.
 func (c *consultas) AsignarRecursos(ctx context.Context, id operclient.Id, body operclient.AsignacionEntrada) (*operclient.Asignacion, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: asignarRecursos sin claims en el contexto")
@@ -1216,6 +1341,9 @@ func (c *consultas) AsignarRecursos(ctx context.Context, id operclient.Id, body 
 // handleRegistrarBitacora (I3). Sin claims es error: el autor de la entrada sale
 // del sujeto del token.
 func (c *consultas) RegistrarEntradaBitacora(ctx context.Context, id operclient.Id, body operclient.EntradaBitacoraEntrada) (*operclient.EntradaBitacora, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: registrarEntradaBitacora sin claims en el contexto")
@@ -1226,6 +1354,9 @@ func (c *consultas) RegistrarEntradaBitacora(ctx context.Context, id operclient.
 // AbrirIncidencia delega en el mismo caso de uso que handleAbrirIncidencia (I3);
 // el rol del actor decide si puede abrirla.
 func (c *consultas) AbrirIncidencia(ctx context.Context, id operclient.Id, body operclient.IncidenciaEntrada) (*operclient.Incidencia, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: abrirIncidencia sin claims en el contexto")
@@ -1236,6 +1367,9 @@ func (c *consultas) AbrirIncidencia(ctx context.Context, id operclient.Id, body 
 // ResolverIncidencia delega en el mismo caso de uso que handleResolverIncidencia
 // (I3); solo supervisor o administrador la resuelven.
 func (c *consultas) ResolverIncidencia(ctx context.Context, id, iid operclient.Id, body operclient.ResolucionIncidenciaEntrada) (*operclient.Incidencia, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: resolverIncidencia sin claims en el contexto")
@@ -1245,16 +1379,25 @@ func (c *consultas) ResolverIncidencia(ctx context.Context, id, iid operclient.I
 
 // ListarEstadias delega en el mismo caso de uso que handleListarEstadias (I3).
 func (c *consultas) ListarEstadias(ctx context.Context, id operclient.Id, params operclient.ListarEstadiasParams) (*operclient.PaginaEstadias, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.viajes.ListarEstadias(ctx, id, params)
 }
 
 // AbrirEstadia delega en el mismo caso de uso que handleAbrirEstadia (I3).
 func (c *consultas) AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.viajes.AbrirEstadia(ctx, id, body)
 }
 
 // CerrarEstadia delega en el mismo caso de uso que handleCerrarEstadia (I3).
 func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.viajes.CerrarEstadia(ctx, id, eid)
 }
 
@@ -1280,20 +1423,32 @@ func (c *consultas) ModificarUnidad(ctx context.Context, id operclient.Id, body 
 
 // CompletarFechaHora comparte la facultad y el caso de uso con handleCompletarFechaHora (I3).
 func (c *consultas) CompletarFechaHora(ctx context.Context, id operclient.Id, body operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.fechaHora(ctx, id, body)
 }
 
 // ListarIncidencias comparte la guarda y el caso de uso con handleListarIncidencias (I3).
 func (c *consultas) ListarIncidencias(ctx context.Context, id operclient.Id, params operclient.ListarIncidenciasParams) (*operclient.PaginaIncidencias, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.incidencias(ctx, id, params)
 }
 
 // ObtenerFicha comparte la guarda y el caso de uso con handleObtenerFicha (I3).
 func (c *consultas) ObtenerFicha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.ficha(ctx, id)
 }
 
 // GuardarFicha comparte la facultad y el caso de uso con handleGuardarFicha (I3).
 func (c *consultas) GuardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error) {
+	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
+		return nil, err
+	}
 	return c.m.guardarFicha(ctx, id, body)
 }
