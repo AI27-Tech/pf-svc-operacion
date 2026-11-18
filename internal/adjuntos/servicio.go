@@ -15,8 +15,8 @@
 //     bloquea la descarga por estado_escaneo: una guarda sin escáner que mueva el
 //     estado bloquearía todo. shortcut: sin guarda de escaneo, hasta que exista
 //     el escáner (DT a registrar).
-//   - El alcance por unidad/tenant no se aplica (DT-07, DEC-045/DEC-053
-//     pendientes): la autorización es por ROL, igual que el resto de operacion.
+//   - El alcance del viaje (DEC-149) no se revisa aquí: lo aplica la guarda de
+//     la raíz del módulo antes de llamar (fuera de alcance, 404).
 package adjuntos
 
 import (

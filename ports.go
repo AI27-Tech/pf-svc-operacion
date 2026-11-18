@@ -5,6 +5,7 @@ import (
 	"time"
 
 	catalogos "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/catalogos"
+	identidad "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/identidad"
 )
 
 // PresupuestoAptitud es el presupuesto de tiempo de la arista síncrona a
@@ -52,7 +53,8 @@ type AptitudRecursos interface {
 }
 
 // AtomosCatalogo es la lectura por id de los átomos de catalogos (obtenerVehiculo
-// y obtenerCustodio), sobre la MISMA arista operacion -> catalogos que
+// y obtenerCustodio) y del cliente al que sirve una unidad (obtenerCliente,
+// DEC-149 #2, tracer.41), sobre la MISMA arista operacion -> catalogos que
 // AptitudRecursos. Cierra la brecha de arriba para el armado del roster (E8-T21,
 // DEC-142): el tipo de la unidad se deriva del tipo del vehículo, y vehículo y
 // custodios deben existir y estar activos. A diferencia de la aptitud, esta
@@ -65,6 +67,9 @@ type AptitudRecursos interface {
 type AtomosCatalogo interface {
 	ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error)
 	ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error)
+	// ObtenerCliente valida el `cliente_id` de una unidad: inexistente o inactivo
+	// es 400 (operacion.yaml, crearUnidad y modificarUnidad, tracer.41).
+	ObtenerCliente(ctx context.Context, clienteID catalogos.Id) (*catalogos.Cliente, error)
 }
 
 // Revocacion es la arista RESTRINGIDA hacia identidad (DEC-051): solo dos
@@ -92,3 +97,23 @@ type Revocacion interface {
 // no es un número de negocio aprobado. Si debe configurarse por despliegue, pasa
 // a Deps/config conservando este valor como default.
 const PresupuestoRevocacion = 2 * time.Second
+
+// Alcances es la tercera operación de la arista RESTRINGIDA hacia identidad:
+// listarAlcances, el snapshot con cursor de los clientes efectivos por sujeto
+// con el que operacion reconstruye su proyección de alcance.cambiado al
+// arrancar (DEC-149 #20, patrón ADR 26). AMPLÍA DEC-051 (que restringía la
+// arista a listarRevocadas y obtenerSesion) por DEC-149 #20; la regla
+// restricted_edges de pf-pkg-platform-go/tools/arch-test/reglas.yaml debe
+// listarla. Es un puerto hermano de Revocacion, y no un método más, para no
+// romper los adaptadores de revocación existentes.
+//
+// Tipado con el contrato para que core pase directamente la sub-fachada
+// Alcances() de identidad (adaptador en proceso, en pf-svc-core). El HTTP vive
+// en adapters/http/. El presupuesto de tiempo lo aplica quien llama (la
+// reconstrucción), así ambos adaptadores lo comparten (I3).
+//
+// Sin cursor: el snapshot (solo sujetos con algún cliente). Con el cursor
+// devuelto: lo que cambió después, y un item con la lista vacía quita al sujeto.
+type Alcances interface {
+	ListarAlcances(ctx context.Context, params identidad.ListarAlcancesParams) (*identidad.PaginaAlcances, error)
+}

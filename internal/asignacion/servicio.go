@@ -448,7 +448,7 @@ func (s *Servicio) Escolta(ctx context.Context, viajeID operclient.Id) (*opercli
 		   JOIN roster.unidad u ON u.id = r.unidad_id
 		   LEFT JOIN roster.unidad_custodio c ON c.unidad_id = u.id
 		  WHERE a.viaje_id = $1 AND a.liberada_en IS NULL
-		  GROUP BY u.id, u.tipo, u.vehiculo_id, u.activa
+		  GROUP BY u.id
 		  ORDER BY u.id`,
 		viajeID)
 	if err != nil {

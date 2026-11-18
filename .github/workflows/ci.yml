@@ -68,7 +68,8 @@ jobs:
       - name: Configurar acceso a módulos privados
         run: git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
       # operacion tiene DOS aristas declaradas: operacion -> catalogos y
-      # operacion -> identidad (restringida a revocación, DEC-051). arch-test
+      # operacion -> identidad (restringida a revocación, DEC-051, y al snapshot
+      # de alcances, DEC-149 #20). arch-test
       # verifica que no haya otras (00 regla 5).
       - name: arch-test
         run: go run github.com/AI27-Tech/pf-pkg-platform-go/tools/arch-test@v0.1.1 .
