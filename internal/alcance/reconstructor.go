@@ -105,7 +105,7 @@ func (r *reconstructor) listar(ctx context.Context, cursor *string) (*identidad.
 func deWire(items []identidad.AlcanceEfectivo) []Alcance {
 	out := make([]Alcance, 0, len(items))
 	for _, it := range items {
-		out = append(out, Alcance{SujetoID: it.SujetoId.String(), Clientes: it.ClientesEfectivosIds, CambiadoEn: it.CambiadoEn})
+		out = append(out, Alcance{IdpSubject: it.IdpSubject, Clientes: it.ClientesEfectivosIds, CambiadoEn: it.CambiadoEn})
 	}
 	return out
 }

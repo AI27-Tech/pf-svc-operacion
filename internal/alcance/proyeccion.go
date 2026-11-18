@@ -19,7 +19,9 @@ type DB interface {
 // Alcance son los clientes efectivos de un sujeto en un instante: el payload de
 // alcance.cambiado y el item de identidad.listarAlcances (DEC-149 #20).
 type Alcance struct {
-	SujetoID   string
+	// IdpSubject es el `sub` del token del sujeto (DEC-149 #22): la llave con
+	// que la guarda busca el alcance de quien hace la petición.
+	IdpSubject string
 	Clientes   []uuid.UUID
 	CambiadoEn time.Time
 }
@@ -38,10 +40,10 @@ func NuevaProyeccion(db DB) *Proyeccion { return &Proyeccion{db: db} }
 // Clientes devuelve los clientes efectivos del sujeto. Un sujeto sin fila no ve
 // nada (lista vacía): falla cerrado. Un error de base se propaga; nunca se
 // interpreta como "todos".
-func (p *Proyeccion) Clientes(ctx context.Context, sujetoID string) ([]uuid.UUID, error) {
+func (p *Proyeccion) Clientes(ctx context.Context, idpSubject string) ([]uuid.UUID, error) {
 	var out []uuid.UUID
 	err := p.db.QueryRow(ctx,
-		`SELECT clientes_ids FROM viajes.alcance_sujeto WHERE sujeto_id = $1`, sujetoID).Scan(&out)
+		`SELECT clientes_ids FROM viajes.alcance_sujeto WHERE idp_subject = $1`, idpSubject).Scan(&out)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -54,9 +56,9 @@ func (p *Proyeccion) Clientes(ctx context.Context, sujetoID string) ([]uuid.UUID
 // upsert guarda a si no es más viejo que lo guardado. `>=` y no `>`: el mismo
 // instante es el mismo cambio, y así la continuación del snapshot repone lo que
 // Reemplazar haya vaciado de más (ver Reemplazar).
-const upsert = `INSERT INTO viajes.alcance_sujeto (sujeto_id, clientes_ids, cambiado_en)
+const upsert = `INSERT INTO viajes.alcance_sujeto (idp_subject, clientes_ids, cambiado_en)
 	VALUES ($1, $2, $3)
-	ON CONFLICT (sujeto_id) DO UPDATE
+	ON CONFLICT (idp_subject) DO UPDATE
 	   SET clientes_ids = EXCLUDED.clientes_ids, cambiado_en = EXCLUDED.cambiado_en
 	 WHERE viajes.alcance_sujeto.cambiado_en <= EXCLUDED.cambiado_en`
 
@@ -89,11 +91,11 @@ func (p *Proyeccion) Reemplazar(ctx context.Context, items []Alcance) error {
 		if err := aplicar(ctx, tx, a); err != nil {
 			return err
 		}
-		presentes = append(presentes, a.SujetoID)
+		presentes = append(presentes, a.IdpSubject)
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE viajes.alcance_sujeto SET clientes_ids = '{}'
-		  WHERE sujeto_id <> ALL($1::text[]) AND cardinality(clientes_ids) > 0`, presentes); err != nil {
+		  WHERE idp_subject <> ALL($1::text[]) AND cardinality(clientes_ids) > 0`, presentes); err != nil {
 		return fmt.Errorf("operacion: vaciar alcances fuera del snapshot: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -104,8 +106,8 @@ func aplicar(ctx context.Context, tx pgx.Tx, a Alcance) error {
 	if clientes == nil {
 		clientes = []uuid.UUID{}
 	}
-	if _, err := tx.Exec(ctx, upsert, a.SujetoID, clientes, a.CambiadoEn.UTC()); err != nil {
-		return fmt.Errorf("operacion: guardar el alcance de %s: %w", a.SujetoID, err)
+	if _, err := tx.Exec(ctx, upsert, a.IdpSubject, clientes, a.CambiadoEn.UTC()); err != nil {
+		return fmt.Errorf("operacion: guardar el alcance de %s: %w", a.IdpSubject, err)
 	}
 	return nil
 }

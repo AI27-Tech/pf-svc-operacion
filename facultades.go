@@ -81,11 +81,8 @@ func exigirFacultadInterna(ctx context.Context, op string) error {
 //     efectivos (proyección de alcance.cambiado) y haber pasado por APROBADO;
 //     si no, 404 igual que si no existiera.
 //
-// shortcut: el sujeto de la proyección es claims.Subject, pero DEC-072 hace
-// del `sub` un id opaco del IdP distinto del sujeto_id de identidad que traen
-// alcance.cambiado y listarAlcances. Mientras el contrato no dé la
-// correspondencia, con un IdP real nadie del monitoreo ve viajes (falla
-// cerrado). Decisión técnica a revisar en el PR.
+// El alcance se busca por claims.Subject: la proyección se indexa por el
+// idp_subject que publica identidad, igual al `sub` del token (DEC-149 #22).
 func (m *Module) exigirAlcance(ctx context.Context, id operclient.Id, a alcance.Acceso) error {
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil || claims.Audiencia == auth.AudienciaCliente {

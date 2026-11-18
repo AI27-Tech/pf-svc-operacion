@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-18 12:15 — la proyección de alcance se indexa por `idp_subject` (tracer.42, DEC-149 #22)
+
+**Para quién:** el Monitorista, el Supervisor y el Coordinador, que con un IdP real no veían ningún viaje: el token trae el `sub` opaco del IdP y la proyección se indexaba por `sujeto_id` (DEC-072).
+
+**Cambios:**
+- `go.mod`/`go.sum`: `api-client-go` a `v0.1.0-tracer.42`. Sin constantes renombradas.
+- `migrations/viajes/0006_alcance.sql`: la llave de `viajes.alcance_sujeto` es `idp_subject` (la migración todavía no estaba en `-d`).
+- `internal/alcance`: el consumidor lee `idp_subject` de `alcance.cambiado` y rechaza un payload sin él; el reconstructor lo toma de `listarAlcances`.
+- `facultades.go`: la guarda busca el alcance por `claims.Subject` sin atajo.
+
 ## 2026-11-17 16:25 — Alcance del monitoreo por cliente y cliente de la unidad (tracer.41, DEC-149)
 
 **Para quién:** el panel interno (vía `bff` y `pf-svc-core`). El Monitorista, el Supervisor y el Coordinador dejan de ver todos los viajes: ven solo los de sus clientes efectivos ("mis clientes" en `identidad`) que pasaron por `APROBADO`. El Jefe Operativo arma la unidad con el cliente al que sirve. Para quien mantiene el servicio: una proyección nueva en Postgres, un consumidor durable con reconstrucción al arrancar, una tercera operación en la arista restringida a `identidad` y una guarda única de alcance para todas las rutas de viaje.

@@ -12,10 +12,13 @@
 -- ve viajes por alcance de monitoreo. cambiado_en ordena: un alcance más viejo
 -- que el guardado no gana. Sin DELETE: quitar a un sujeto es dejar su conjunto
 -- vacío, conservando cambiado_en para que un evento atrasado no lo reviva.
--- sujeto_id es TEXT: es el id de identidad tal cual llega en el evento.
+-- La llave es idp_subject, el `sub` del token del sujeto (DEC-149 #22,
+-- tracer.42): la guarda busca el alcance de quien hace la petición con su
+-- claims.Subject, porque el `sub` es opaco y distinto del sujeto_id (DEC-072).
+-- TEXT porque el subject del IdP no es un UUID.
 
 CREATE TABLE IF NOT EXISTS viajes.alcance_sujeto (
-  sujeto_id    TEXT        PRIMARY KEY,
+  idp_subject  TEXT        PRIMARY KEY,
   clientes_ids UUID[]      NOT NULL DEFAULT '{}',
   cambiado_en  TIMESTAMPTZ NOT NULL
 );

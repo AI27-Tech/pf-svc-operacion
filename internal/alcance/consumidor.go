@@ -14,9 +14,11 @@ import (
 const TipoAlcanceCambiado = "alcance.cambiado"
 
 // payload es AlcanceCambiado de sujeto.proto tal como identidad lo publica en
-// JSON (sujeto_id, clientes_efectivos_ids, cambiado_en en RFC 3339).
+// JSON (sujeto_id, idp_subject, clientes_efectivos_ids, cambiado_en en RFC
+// 3339). La proyección se indexa por idp_subject, el `sub` del token (DEC-149
+// #22, tracer.42); sujeto_id no se usa.
 type payload struct {
-	SujetoID             string    `json:"sujeto_id"`
+	IdpSubject           string    `json:"idp_subject"`
 	ClientesEfectivosIDs []string  `json:"clientes_efectivos_ids"`
 	CambiadoEn           time.Time `json:"cambiado_en"`
 }
@@ -32,7 +34,7 @@ type Consumidor struct {
 func NuevoConsumidor(proy *Proyeccion) *Consumidor { return &Consumidor{proy: proy} }
 
 // Procesar maneja un sobre del bus. Otro tipo se acusa sin efecto. Un payload
-// ilegible (JSON inválido, sin sujeto o sin cambiado_en, ids que no son UUID) se
+// ilegible (JSON inválido, sin idp_subject o sin cambiado_en, ids que no son UUID) se
 // acusa sin aplicar, como en los demás consumidores: reintentarlo daría lo
 // mismo y bloquearía la cola. Un error de base se devuelve para reintentar.
 func (c *Consumidor) Procesar(ctx context.Context, s bus.Sobre) error {
@@ -48,10 +50,10 @@ func (c *Consumidor) Procesar(ctx context.Context, s bus.Sobre) error {
 
 func leer(raw []byte) (Alcance, bool) {
 	var p payload
-	if json.Unmarshal(raw, &p) != nil || p.SujetoID == "" || p.CambiadoEn.IsZero() {
+	if json.Unmarshal(raw, &p) != nil || p.IdpSubject == "" || p.CambiadoEn.IsZero() {
 		return Alcance{}, false
 	}
-	a := Alcance{SujetoID: p.SujetoID, CambiadoEn: p.CambiadoEn, Clientes: make([]uuid.UUID, 0, len(p.ClientesEfectivosIDs))}
+	a := Alcance{IdpSubject: p.IdpSubject, CambiadoEn: p.CambiadoEn, Clientes: make([]uuid.UUID, 0, len(p.ClientesEfectivosIDs))}
 	for _, id := range p.ClientesEfectivosIDs {
 		u, err := uuid.Parse(id)
 		if err != nil {

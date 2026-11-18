@@ -57,8 +57,8 @@ func fijarAlcance(t *testing.T, ctx context.Context, c *auth.Claims, clientes ..
 	if clientes == nil {
 		clientes = []uuid.UUID{}
 	}
-	if _, err := admin.Exec(ctx, `INSERT INTO viajes.alcance_sujeto (sujeto_id, clientes_ids, cambiado_en) VALUES ($1, $2, now())
-		ON CONFLICT (sujeto_id) DO UPDATE SET clientes_ids = EXCLUDED.clientes_ids, cambiado_en = EXCLUDED.cambiado_en`,
+	if _, err := admin.Exec(ctx, `INSERT INTO viajes.alcance_sujeto (idp_subject, clientes_ids, cambiado_en) VALUES ($1, $2, now())
+		ON CONFLICT (idp_subject) DO UPDATE SET clientes_ids = EXCLUDED.clientes_ids, cambiado_en = EXCLUDED.cambiado_en`,
 		c.Subject, clientes); err != nil {
 		t.Fatalf("fijar alcance: %v", err)
 	}
@@ -359,11 +359,11 @@ func TestAlcanceProyeccion(t *testing.T) {
 	t0 := time.Now().UTC().Add(-time.Hour)
 	fake := &alcancesFake{
 		snapshot: []identidad.AlcanceEfectivo{
-			{SujetoId: uA, ClientesEfectivosIds: []uuid.UUID{A}, CambiadoEn: t0},
-			{SujetoId: uB, ClientesEfectivosIds: []uuid.UUID{B}, CambiadoEn: t0},
+			{SujetoId: uuid.New(), IdpSubject: uA.String(), ClientesEfectivosIds: []uuid.UUID{A}, CambiadoEn: t0},
+			{SujetoId: uuid.New(), IdpSubject: uB.String(), ClientesEfectivosIds: []uuid.UUID{B}, CambiadoEn: t0},
 		},
 		continuacion: []identidad.AlcanceEfectivo{
-			{SujetoId: uB, ClientesEfectivosIds: []uuid.UUID{}, CambiadoEn: t0.Add(time.Minute)},
+			{SujetoId: uuid.New(), IdpSubject: uB.String(), ClientesEfectivosIds: []uuid.UUID{}, CambiadoEn: t0.Add(time.Minute)},
 		},
 	}
 	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorTabla{}, Atomos: catalogo, Subscriber: sub, Alcances: fake})
@@ -423,7 +423,7 @@ func TestAlcanceProyeccion(t *testing.T) {
 		for _, c := range clientes {
 			ids = append(ids, c.String())
 		}
-		p, _ := json.Marshal(map[string]any{"sujeto_id": sujeto.String(), "clientes_efectivos_ids": ids, "cambiado_en": cuando.Format(time.RFC3339Nano)})
+		p, _ := json.Marshal(map[string]any{"sujeto_id": uuid.NewString(), "idp_subject": sujeto.String(), "clientes_efectivos_ids": ids, "cambiado_en": cuando.Format(time.RFC3339Nano)})
 		if err := s.h(ctx, bus.Sobre{EventoID: uuid.NewString(), Tipo: "alcance.cambiado", AgregadoID: sujeto.String(), Payload: p}); err != nil {
 			t.Fatalf("procesar evento: %v", err)
 		}

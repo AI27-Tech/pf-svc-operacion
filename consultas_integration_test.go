@@ -208,9 +208,9 @@ func darAlcance(t *testing.T, ctx context.Context, c *auth.Claims, viajes ...ope
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
 	if _, err := admin.Exec(ctx, `
-		INSERT INTO viajes.alcance_sujeto (sujeto_id, clientes_ids, cambiado_en)
+		INSERT INTO viajes.alcance_sujeto (idp_subject, clientes_ids, cambiado_en)
 		SELECT $1, array_agg(DISTINCT cliente_id), now() FROM viajes.viaje WHERE id = ANY($2)
-		ON CONFLICT (sujeto_id) DO UPDATE SET clientes_ids = ARRAY(
+		ON CONFLICT (idp_subject) DO UPDATE SET clientes_ids = ARRAY(
 		  SELECT DISTINCT x FROM unnest(viajes.alcance_sujeto.clientes_ids || EXCLUDED.clientes_ids) x)`,
 		c.Subject, viajes); err != nil {
 		t.Fatalf("dar alcance a %s: %v", c.Subject, err)
