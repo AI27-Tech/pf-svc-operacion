@@ -93,6 +93,18 @@ func (a *AptitudRecursosHTTP) ObtenerCustodio(ctx context.Context, custodioID ca
 	return deRespuesta(resp.StatusCode(), resp.JSON200)
 }
 
+// ObtenerCliente lee el cliente vigente por id (puerto AtomosCatalogo, DEC-149 #2).
+func (a *AptitudRecursosHTTP) ObtenerCliente(ctx context.Context, clienteID catalogos.Id) (*catalogos.Cliente, error) {
+	ctx, cancel := context.WithTimeout(ctx, operacion.PresupuestoAptitud)
+	defer cancel()
+
+	resp, err := a.cli.ObtenerClienteWithResponse(ctx, clienteID)
+	if err != nil {
+		return nil, traducirError("ObtenerCliente", err)
+	}
+	return deRespuesta(resp.StatusCode(), resp.JSON200)
+}
+
 // deRespuesta traduce el código HTTP a la taxonomía de la plataforma. 404 es
 // no_encontrado (el roster lo vuelve referencia inválida); cualquier otro no-200
 // es degradado, no roto: la aptitud lo trata como "aptitud desconocida"

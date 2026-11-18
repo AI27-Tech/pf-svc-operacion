@@ -30,6 +30,7 @@ type BeginTx interface {
 type Atomos interface {
 	ObtenerVehiculo(ctx context.Context, vehiculoID catalogos.Id) (*catalogos.Vehiculo, error)
 	ObtenerCustodio(ctx context.Context, custodioID catalogos.Id) (*catalogos.Custodio, error)
+	ObtenerCliente(ctx context.Context, clienteID catalogos.Id) (*catalogos.Cliente, error)
 }
 
 // Reservas es la guarda de reserva vigente (DEC-142 #5). La implementa
@@ -62,8 +63,9 @@ const paginaMax = 50
 
 // Columnas es la proyección de una unidad con sus custodios agregados, en el
 // orden que espera Escanear. Requiere `roster.unidad u` y un LEFT JOIN de
-// `roster.unidad_custodio c`, agrupando por las columnas de u.
-const Columnas = `u.id, u.tipo, u.vehiculo_id, u.activa,
+// `roster.unidad_custodio c`, agrupando por u.id (su PK: el resto de u depende
+// de ella, así que una columna nueva no obliga a tocar cada GROUP BY).
+const Columnas = `u.id, u.tipo, u.vehiculo_id, u.activa, u.cliente_id,
 	COALESCE(array_agg(c.custodio_id ORDER BY c.custodio_id)
 	         FILTER (WHERE c.custodio_id IS NOT NULL), '{}')`
 
@@ -76,7 +78,7 @@ func Escanear(row pgx.Row) (operclient.Unidad, error) {
 		vehiculo  string
 		custodios []string
 	)
-	if err := row.Scan(&u.Id, &tipo, &vehiculo, &u.Activa, &custodios); err != nil {
+	if err := row.Scan(&u.Id, &tipo, &vehiculo, &u.Activa, &u.ClienteId, &custodios); err != nil {
 		return u, fmt.Errorf("operacion: escanear unidad: %w", err)
 	}
 	t := operclient.UnidadTipo(tipo)
@@ -124,7 +126,7 @@ func (s *Servicio) Listar(ctx context.Context, params operclient.ListarUnidadesP
 		   FROM roster.unidad u
 		   LEFT JOIN roster.unidad_custodio c ON c.unidad_id = u.id
 		  WHERE $1::uuid IS NULL OR u.id > $1
-		  GROUP BY u.id, u.tipo, u.vehiculo_id, u.activa
+		  GROUP BY u.id
 		  ORDER BY u.id
 		  LIMIT $2`,
 		desde, paginaMax+1) // +1 para saber si hay página siguiente

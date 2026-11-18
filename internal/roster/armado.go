@@ -63,6 +63,11 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.UnidadEntrada) (*ope
 	if err := s.verificarCustodios(ctx, in.CustodiosIds); err != nil {
 		return nil, err
 	}
+	if in.ClienteId != nil {
+		if err := s.verificarCliente(ctx, *in.ClienteId); err != nil {
+			return nil, err
+		}
+	}
 	activa := in.Activa == nil || *in.Activa
 
 	tx, err := s.tx.Begin(ctx)
@@ -73,8 +78,8 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.UnidadEntrada) (*ope
 
 	id := uuid.New()
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa) VALUES ($1, $2, $3, $4)`,
-		id, string(tipo), in.VehiculoId.String(), activa,
+		`INSERT INTO roster.unidad (id, tipo, vehiculo_id, activa, cliente_id) VALUES ($1, $2, $3, $4, $5)`,
+		id, string(tipo), in.VehiculoId.String(), activa, in.ClienteId,
 	); err != nil {
 		return nil, traducir(err, "crear unidad")
 	}
@@ -91,10 +96,15 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.UnidadEntrada) (*ope
 	return u, nil
 }
 
-// Modificar cambia vehículo, custodios o `activa` de una unidad. Una unidad con
-// reserva en un viaje no terminal no se toca (409, guarda de asignacion). Las
-// referencias nuevas se validan contra catalogos antes de tomar la guarda;
-// reactivar no revalida contra catalogos (DEC-142 no lo pide).
+// Modificar cambia vehículo, custodios, cliente o `activa` de una unidad. Una
+// unidad con reserva en un viaje no terminal no se toca, cualquiera que sea el
+// campo (409, guarda de asignacion, DEC-142 #5). Las referencias nuevas se
+// validan contra catalogos antes de tomar la guarda; reactivar no revalida
+// contra catalogos (DEC-142 no lo pide).
+//
+// ClienteId: nil no lo toca; &QuitarCliente (uuid.Nil) lo quita; otro valor lo
+// fija tras validarlo. Quien recibe el JSON traduce `"cliente_id": null` a
+// &QuitarCliente, porque el tipo generado no distingue null de ausente.
 func (s *Servicio) Modificar(ctx context.Context, id uuid.UUID, in operclient.UnidadModificacion) (*operclient.Unidad, error) {
 	var tipoNuevo *operclient.UnidadTipo
 	if in.VehiculoId != nil {
@@ -109,6 +119,11 @@ func (s *Servicio) Modificar(ctx context.Context, id uuid.UUID, in operclient.Un
 			return nil, err
 		}
 		if err := s.verificarCustodios(ctx, *in.CustodiosIds); err != nil {
+			return nil, err
+		}
+	}
+	if in.ClienteId != nil && *in.ClienteId != uuid.Nil {
+		if err := s.verificarCliente(ctx, *in.ClienteId); err != nil {
 			return nil, err
 		}
 	}
@@ -165,9 +180,17 @@ func (s *Servicio) Modificar(ctx context.Context, id uuid.UUID, in operclient.Un
 		if in.Activa != nil {
 			activa = *in.Activa
 		}
+		// $5 fija si se toca el cliente; $6 es el valor (NULL para quitarlo).
+		var cliente *uuid.UUID
+		if in.ClienteId != nil && *in.ClienteId != uuid.Nil {
+			cliente = in.ClienteId
+		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE roster.unidad SET tipo = $2, vehiculo_id = COALESCE($3, vehiculo_id), activa = $4 WHERE id = $1`,
-			id, string(tipo), vehiculo, activa,
+			`UPDATE roster.unidad
+			    SET tipo = $2, vehiculo_id = COALESCE($3, vehiculo_id), activa = $4,
+			        cliente_id = CASE WHEN $5 THEN $6 ELSE cliente_id END
+			  WHERE id = $1`,
+			id, string(tipo), vehiculo, activa, in.ClienteId != nil, cliente,
 		); err != nil {
 			return traducir(err, "modificar unidad")
 		}
@@ -249,6 +272,29 @@ func (s *Servicio) verificarCustodios(ctx context.Context, ids []uuid.UUID) erro
 	return nil
 }
 
+// QuitarCliente es el ClienteId de UnidadModificacion que quita el cliente de la
+// unidad (`"cliente_id": null` en el JSON). Ningún cliente real tiene el UUID nulo.
+var QuitarCliente = uuid.Nil
+
+// verificarCliente exige que el cliente exista y esté activo en catalogos
+// (DEC-149 #2, mismo trato que vehículo y custodio).
+func (s *Servicio) verificarCliente(ctx context.Context, id uuid.UUID) error {
+	if s.atomos == nil {
+		return platformerrors.NewDegradado("operacion: la lectura de clientes de catalogos no está cableada")
+	}
+	c, err := s.atomos.ObtenerCliente(ctx, id)
+	if err != nil {
+		if platformerrors.AsCategory(err) == platformerrors.CategoryNoEncontrado {
+			return platformerrors.NewValidacion("operacion: el cliente %s no existe en catalogos", id)
+		}
+		return err
+	}
+	if c.Estado != catalogos.ClienteEstadoActivo {
+		return platformerrors.NewValidacion("operacion: el cliente %s está inactivo en catalogos", id)
+	}
+	return nil
+}
+
 // insertarCustodios escribe la composición en orden de id, para que dos
 // escrituras concurrentes tomen los candados del índice único en el mismo orden.
 func insertarCustodios(ctx context.Context, tx pgx.Tx, unidadID uuid.UUID, activa bool, ids []uuid.UUID) error {
@@ -271,7 +317,7 @@ func leer(ctx context.Context, tx pgx.Tx, id uuid.UUID) (*operclient.Unidad, err
 		   FROM roster.unidad u
 		   LEFT JOIN roster.unidad_custodio c ON c.unidad_id = u.id
 		  WHERE u.id = $1
-		  GROUP BY u.id, u.tipo, u.vehiculo_id, u.activa`, id))
+		  GROUP BY u.id`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: unidad %s no encontrada", id)
 	}

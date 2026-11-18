@@ -12,6 +12,7 @@ import (
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/alcance"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -296,23 +297,58 @@ func (s *Servicio) Obtener(ctx context.Context, id operclient.Id) (*operclient.V
 }
 
 // Listar devuelve una página de viajes, más recientes primero, con filtro
-// opcional por estado y paginación por cursor keyset sobre (creado_en, id).
-//
-// shortcut: no aplica alcance de flota (lista todos, vista del operador
-// interno). El filtrado fino por unidad espera el vínculo identidad→alcance
-// (DEC-045/DEC-053, pendiente; DT-07). El alcance del cliente va por
-// ListarDeCliente.
+// opcional por estado y paginación por cursor keyset sobre (creado_en, id). Sin
+// acotar: es la vista de alcance global (jefe_operativo, administrador). El
+// alcance del cliente va por ListarDeCliente y el del monitoreo por
+// ListarDeClientes (DEC-149).
 func (s *Servicio) Listar(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
-	return s.listar(ctx, params, nil)
+	return s.listar(ctx, params, "", nil)
 }
 
 // ListarDeCliente es Listar acotado a los viajes de un cliente (tenant ==
 // cliente_id, DEC-112). Un clienteID vacío no devuelve nada.
 func (s *Servicio) ListarDeCliente(ctx context.Context, params operclient.ListarViajesParams, clienteID string) (*operclient.PaginaViajes, error) {
-	return s.listar(ctx, params, &clienteID)
+	return s.listar(ctx, params, "v.cliente_id::text = $%d", clienteID)
 }
 
-func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesParams, clienteID *string) (*operclient.PaginaViajes, error) {
+// ListarDeClientes es Listar acotado al alcance del monitoreo (DEC-149): viajes
+// de esos clientes que pasaron por APROBADO. El filtro va en el WHERE, antes del
+// cursor, así que la paginación sigue siendo correcta. Sin clientes no devuelve
+// nada.
+func (s *Servicio) ListarDeClientes(ctx context.Context, params operclient.ListarViajesParams, clientes []uuid.UUID) (*operclient.PaginaViajes, error) {
+	if clientes == nil {
+		clientes = []uuid.UUID{}
+	}
+	return s.listar(ctx, params, "v.cliente_id = ANY($%d::uuid[]) AND "+alcance.SQLPasoPorAprobado, clientes)
+}
+
+// HechosAlcance lee lo que la regla de alcance necesita del viaje (DEC-149).
+// 404 si no existe.
+func (s *Servicio) HechosAlcance(ctx context.Context, id operclient.Id) (alcance.Hechos, error) {
+	var h alcance.Hechos
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return h, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx,
+		`SELECT v.cliente_id, v.estado, EXISTS (
+		        SELECT 1 FROM viajes.transicion_viaje t
+		         WHERE t.viaje_id = v.id AND t.de_estado = 'SOLICITADO' AND t.a_estado = 'CANCELADO')
+		   FROM viajes.viaje v WHERE v.id = $1`, id,
+	).Scan(&h.ClienteID, &h.Estado, &h.CanceladoDesdeSolicitado)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return h, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
+	}
+	if err != nil {
+		return h, fmt.Errorf("operacion: leer el viaje para el alcance: %w", err)
+	}
+	return h, nil
+}
+
+// listar aplica, si filtro no está vacío, una condición con un solo parámetro
+// ($%d) cuyo valor es arg.
+func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesParams, filtro string, arg any) (*operclient.PaginaViajes, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -322,9 +358,9 @@ func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesPar
 	conds := []string{}
 	args := []any{}
 	n := 1
-	if clienteID != nil {
-		conds = append(conds, fmt.Sprintf("cliente_id::text = $%d", n))
-		args = append(args, *clienteID)
+	if filtro != "" {
+		conds = append(conds, fmt.Sprintf(filtro, n))
+		args = append(args, arg)
 		n++
 	}
 	if params.Estado != nil {
@@ -348,7 +384,7 @@ func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesPar
 	args = append(args, paginaMax+1) // +1 para saber si hay página siguiente
 	q := fmt.Sprintf(
 		`SELECT id, estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
-		   FROM viajes.viaje %s ORDER BY creado_en DESC, id DESC LIMIT $%d`, where, n)
+		   FROM viajes.viaje v %s ORDER BY creado_en DESC, id DESC LIMIT $%d`, where, n)
 
 	rows, err := tx.Query(ctx, q, args...)
 	if err != nil {

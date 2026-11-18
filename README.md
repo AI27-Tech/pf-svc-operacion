@@ -51,6 +51,19 @@ ningún otro servicio puede introducir otra sin un ADR.
   `sesion.revocada` deduplican por `evento_id` en memoria; su efecto es en
   memoria (caché / proyección de revocación reconstruida desde snapshot, ADR 26),
   sin tabla `inbox_evento`.
+- **Alcance del monitoreo por cliente (DEC-149, tracer.41):** `jefe_operativo`
+  y `administrador` ven todos los viajes; `monitorista`, `supervisor` y
+  `coordinador`, los de sus clientes efectivos que pasaron por `APROBADO`;
+  `ejecutivo`, `403`; `reaccion`, `403` salvo `obtenerViaje` y
+  `obtenerAsignacion` de su caso. Fuera de alcance, el viaje no aparece en la
+  lista y toda operación sobre él responde `404`. Una sola guarda
+  (`exigirAlcance`, `facultades.go`) para HTTP y la fachada; la regla vive en
+  `internal/alcance`. Los clientes efectivos salen de la proyección de
+  `alcance.cambiado` en `viajes.alcance_sujeto` (en Postgres: el consumidor es
+  durable y comparte grupo entre réplicas), reconstruida al arrancar con
+  `identidad.listarAlcances` y su cursor; la réplica queda not-ready hasta
+  converger. El cliente de la unidad (`roster.unidad.cliente_id`) es dato del
+  roster y no interviene.
 - **Aptitud informativa (DEC-055):** `AptitudRecursos` consulta aptitud pero
   **nunca gatea**. El único rechazo de asignación es la reserva fallida.
 
@@ -59,7 +72,12 @@ ningún otro servicio puede introducir otra sin un ADR.
 - `operacion → catalogos` (puerto `AptitudRecursos`, en `ports.go`). Adaptador
   HTTP en `adapters/http/`; el en proceso vive en `pf-svc-core`, no aquí.
 - `operacion → identidad` restringida a revocación (`listarRevocadas`,
-  `obtenerSesion`; DEC-051, puerto `Revocacion`).
+  `obtenerSesion`; DEC-051, puerto `Revocacion`) y, desde tracer.41, al
+  snapshot de alcances (`listarAlcances`; DEC-149 #20, puerto `Alcances`, que
+  amplía DEC-051). Adaptador HTTP en `adapters/http/alcances.go`; en `core` se
+  pasa la sub-fachada `Alcances()` de `identidad`.
+- `operacion → catalogos` también lee clientes (`obtenerCliente`, puerto
+  `AtomosCatalogo`) para validar el `cliente_id` de una unidad.
 - No llama a `mensajeria`, `reportes`, `realtime` ni `procesamiento`: todo les
   llega por evento. No importa ningún otro `pf-svc-*`.
 

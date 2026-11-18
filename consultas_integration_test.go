@@ -57,7 +57,7 @@ func moduloConViajes(t *testing.T, ctx context.Context) *operacion.Module {
 		dbtest.Exec(t, ctx, admin, string(sql))
 	}
 	dbtest.Exec(t, ctx, admin,
-		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox")
+		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, viajes.alcance_sujeto")
 	pool, cerrarPool := dbtest.PoolAs(t, ctx, "op_viajes", "viajes")
 	t.Cleanup(cerrarPool)
 	m, err := operacion.New(operacion.Pools{Viajes: &platformpgx.Pool{Pool: pool, Role: "op_viajes"}}, operacion.Deps{Verificador: autenticadorJefe{}})
@@ -133,6 +133,12 @@ var claimsSupervisor = &auth.Claims{Subject: "sup-1", Rol: "supervisor", Audienc
 // con los pools de viajes, asignacion y bitacora, como core.
 func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 	t.Helper()
+	return moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorJefe{}, Atomos: catalogo})
+}
+
+// moduloCompletoCon es moduloCompleto con los puertos dados.
+func moduloCompletoCon(t *testing.T, ctx context.Context, d operacion.Deps) *operacion.Module {
+	t.Helper()
 	dbtest.Serializar(t, ctx)
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
@@ -157,7 +163,7 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 		}
 	}
 	dbtest.Exec(t, ctx, admin,
-		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, "+
+		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, viajes.alcance_sujeto, "+
 			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora, "+
 			"roster.unidad_custodio, roster.unidad")
 	pool := func(rol, searchPath string) *platformpgx.Pool {
@@ -170,7 +176,8 @@ func moduloCompleto(t *testing.T, ctx context.Context) *operacion.Module {
 		Asignacion: pool("op_asignacion", "viajes"),
 		Bitacora:   pool("op_bitacora", ""),
 		Roster:     pool("op_roster", ""),
-	}, operacion.Deps{Verificador: autenticadorJefe{}, Atomos: catalogo})
+		Auditoria:  pool("op_auditoria", ""),
+	}, d)
 	if err != nil {
 		t.Fatalf("operacion.New: %v", err)
 	}
@@ -192,6 +199,22 @@ func viajeAprobado(t *testing.T, ctx context.Context, api operacion.ConsultasAPI
 		t.Fatalf("aprobar viaje: %v", err)
 	}
 	return v.Id
+}
+
+// darAlcance agrega a la proyección de alcance del sujeto de c los clientes de
+// los viajes dados, como la dejaría alcance.cambiado de identidad (DEC-149).
+func darAlcance(t *testing.T, ctx context.Context, c *auth.Claims, viajes ...operclient.Id) {
+	t.Helper()
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+	if _, err := admin.Exec(ctx, `
+		INSERT INTO viajes.alcance_sujeto (idp_subject, clientes_ids, cambiado_en)
+		SELECT $1, array_agg(DISTINCT cliente_id), now() FROM viajes.viaje WHERE id = ANY($2)
+		ON CONFLICT (idp_subject) DO UPDATE SET clientes_ids = ARRAY(
+		  SELECT DISTINCT x FROM unnest(viajes.alcance_sujeto.clientes_ids || EXCLUDED.clientes_ids) x)`,
+		c.Subject, viajes); err != nil {
+		t.Fatalf("dar alcance a %s: %v", c.Subject, err)
+	}
 }
 
 // mismoStatus afirma que la fachada y la ruta HTTP (con claimsJefe) rechazan con
@@ -307,6 +330,8 @@ func TestConsultasIncidencias(t *testing.T) {
 	ctxSup := auth.ContextWithClaims(ctx, claimsSupervisor)
 
 	id := viajeAprobado(t, ctx, api)
+	darAlcance(t, ctx, claimsSupervisor, id)
+	darAlcance(t, ctx, claimsMonitorista, id)
 	inc, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
 	if err != nil {
 		t.Fatalf("AbrirIncidencia: %v", err)
@@ -498,6 +523,7 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 	}
 
 	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+	darAlcance(t, ctx, monitorista, v.Id) // en alcance: 403 por facultad, no 404 por alcance
 	if _, err := api.CompletarFechaHora(auth.ContextWithClaims(ctx, monitorista), v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
 		t.Errorf("monitorista: err %v, quiere 403", err)
 	}
@@ -521,6 +547,7 @@ func TestConsultasListarIncidencias(t *testing.T) {
 	ctxSup := auth.ContextWithClaims(ctx, claimsSupervisor)
 
 	id := viajeAprobado(t, ctx, api)
+	darAlcance(t, ctx, claimsSupervisor, id)
 	a, err := api.AbrirIncidencia(ctxSup, id, operclient.IncidenciaEntrada{TipoInterno: "falla_mecanica"})
 	if err != nil {
 		t.Fatalf("abrir A: %v", err)
@@ -574,6 +601,7 @@ func TestConsultasFicha(t *testing.T) {
 	api := m.Consultas()
 	ctxMon := auth.ContextWithClaims(ctx, claimsMonitorista)
 	id := viajeAprobado(t, ctx, api)
+	darAlcance(t, ctx, claimsMonitorista, id)
 
 	f, err := api.ObtenerFicha(auth.ContextWithClaims(ctx, claimsJefe), id)
 	if err != nil {
