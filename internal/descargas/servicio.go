@@ -9,7 +9,7 @@
 // transacción del rol dueño op_auditoria —que tiene INSERT sobre
 // auditoria.registro_auditoria por diseño (migrations/auditoria/0001_init.sql)—.
 // No se otorga GRANT de escritura a op_viajes ni se abre una segunda excepción
-// de GRANT cruzado (la única es la de op_asignacion, ADR 31/33): el camino es el
+// de GRANT cruzado (solo hay dos: op_asignacion, ADR 31/33, y op_solicitudes, ADR 39): el camino es el
 // rol dueño, sin ADR.
 //
 // La lectura del viaje para la respuesta (su Viaje) corre por SEPARADO sobre el

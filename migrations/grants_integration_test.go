@@ -20,8 +20,9 @@ import (
 //
 // Prueba comportamiento observable, no bits de catálogo: hace la escritura y
 // afirma el resultado que vería el caso de uso. El caso central es la ÚNICA
-// excepción de GRANT del sistema (op_asignacion), que debe poder escribir la
-// transición, el outbox y la auditoría del viaje en su transacción, y NADA más.
+// dos excepciones de GRANT del sistema: op_asignacion (escribe la transición, el
+// outbox y la auditoría del viaje en su transacción) y op_solicitudes (ADR 39:
+// solo INSERT para crear el viaje al aprobar la solicitud), y NADA más.
 //
 // Se salta si OPERACION_TEST_DB no está definido (CI sin Postgres).
 func TestGrantsPorTabla(t *testing.T) {
@@ -35,8 +36,8 @@ func TestGrantsPorTabla(t *testing.T) {
 
 	// Teardown de roles antes y después: los roles son globales al cluster, los
 	// esquemas los limpiamos con CASCADE. Idempotente ante corridas previas a medias.
-	roles := []string{"op_viajes", "op_asignacion", "op_bitacora", "op_auditoria", "op_roster"}
-	esquemas := []string{"viajes", "asignacion", "bitacora", "auditoria", "roster"}
+	roles := []string{"op_viajes", "op_asignacion", "op_bitacora", "op_auditoria", "op_roster", "op_solicitudes"}
+	esquemas := []string{"viajes", "asignacion", "bitacora", "auditoria", "roster", "solicitudes"}
 	limpiar := func() {
 		for _, s := range esquemas {
 			dbtest.Exec(t, ctx, admin, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", s))
@@ -51,30 +52,36 @@ func TestGrantsPorTabla(t *testing.T) {
 	defer limpiar()
 
 	// Aplicar las migraciones reales como admin, EN DOS FASES:
-	//   fase 1: todos los 0001 (estructura: esquemas, roles, tablas),
-	//   fase 2: todos los 0002 (grants por tabla).
-	// Los grants de la excepción de op_asignacion (en viajes/auditoria/roster)
-	// referencian un rol que crea asignacion/0001, el último del orden por
-	// esquema. Separar por fase garantiza que todos los roles existan antes de
-	// cualquier grant cruzado. Dentro de cada fase, migrations.Orden resuelve las
-	// dependencias de esquema. En producción el aplicador debe hacer lo mismo.
-	for _, version := range []string{"0001", "0002"} {
+	//   fase 1: el 0001 de cada esquema (estructura: esquemas, roles, tablas),
+	//   fase 2: todos los demás (grants por tabla y tablas posteriores).
+	// Los grants de las excepciones (op_asignacion y op_solicitudes, en
+	// viajes/auditoria/roster) referencian roles que crean asignacion/0001 y
+	// solicitudes/0001, los últimos del orden. Separar por fase garantiza que todos
+	// los roles existan antes de cualquier grant cruzado. Dentro de cada fase,
+	// migrations.Orden resuelve las dependencias de esquema. En producción el
+	// aplicador hace lo mismo.
+	aplica := func(archivo string) {
+		sql, err := migrations.FS.ReadFile(archivo)
+		if err != nil {
+			t.Fatalf("leer %s: %v", archivo, err)
+		}
+		if _, err := admin.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("aplicar %s: %v", archivo, err)
+		}
+	}
+	for _, fase := range []int{1, 2} {
 		for _, esquema := range migrations.Orden {
 			archivos, err := migrations.ArchivosDe(esquema)
-			if err != nil {
+			if err != nil || len(archivos) == 0 {
 				t.Fatalf("listar migraciones de %s: %v", esquema, err)
 			}
+			if fase == 1 {
+				archivos = archivos[:1]
+			} else {
+				archivos = archivos[1:]
+			}
 			for _, archivo := range archivos {
-				if !strings.Contains(archivo, "/"+version) {
-					continue
-				}
-				sql, err := migrations.FS.ReadFile(archivo)
-				if err != nil {
-					t.Fatalf("leer %s: %v", archivo, err)
-				}
-				if _, err := admin.Exec(ctx, string(sql)); err != nil {
-					t.Fatalf("aplicar %s: %v", archivo, err)
-				}
+				aplica(archivo)
 			}
 		}
 	}
@@ -205,7 +212,7 @@ func TestGrantsPorTabla(t *testing.T) {
 	defer closeViajes()
 	viajeID := "55555555-5555-5555-5555-555555555555"
 	mustExec(t, ctx, poolViajes,
-		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX')`, viajeID),
+		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, nacio_de_solicitud) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX', false)`, viajeID),
 		"op_viajes debe poder insertar un viaje")
 	mustExec(t, ctx, poolViajes,
 		`UPDATE viajes.viaje SET estado = 'ASIGNADO' WHERE id = '`+viajeID+`'`,
@@ -283,6 +290,157 @@ func TestGrantsPorTabla(t *testing.T) {
 	mustExec(t, ctx, poolRoster,
 		`DELETE FROM roster.unidad WHERE id = '`+unidadID+`'`,
 		"op_roster debe poder dar de baja (DELETE) una unidad del roster")
+
+	// --- op_solicitudes: la segunda excepción (ADR 39). Solo INSERT en viajes. ---
+	poolSol, closeSol := dbtest.PoolAs(t, ctx, "op_solicitudes", "")
+	defer closeSol()
+	solViaje := "88888888-8888-8888-8888-888888888888"
+
+	// Lo que SÍ puede: crear el viaje en APROBADO, su transición inicial, su
+	// evento en el outbox único y el registro de auditoría (INSERT sin RETURNING).
+	mustExec(t, ctx, poolSol,
+		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, nacio_de_solicitud) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX', false)`, solViaje),
+		"op_solicitudes debe poder crear el viaje")
+	mustExec(t, ctx, poolSol,
+		`INSERT INTO viajes.destino (id, viaje_id, orden, nombre) VALUES (gen_random_uuid(), '`+solViaje+`', 1, 'Destino')`,
+		"op_solicitudes debe poder escribir los destinos del viaje")
+	mustExec(t, ctx, poolSol,
+		`INSERT INTO viajes.outbox (evento_id, tipo, agregado_id, ocurrido_en, payload)
+		 VALUES (gen_random_uuid(), 'viaje.creado', '`+solViaje+`', now(), '{}'::jsonb)`,
+		"op_solicitudes debe poder escribir viaje.creado en el outbox único")
+	mustExec(t, ctx, poolSol,
+		`INSERT INTO auditoria.registro_auditoria (modulo, accion) VALUES ('solicitudes', 'aprobar')`,
+		"op_solicitudes debe poder escribir el registro de auditoría")
+
+	// Lo que NO puede: guiado por la tabla permisosOpSolicitudes, para CADA tabla de
+	// viajes y auditoria y las cuatro operaciones. Primero, la tabla declarada
+	// cubre todas las tablas reales de los dos esquemas (una tabla nueva obliga a
+	// decidir su permiso aquí). Después, cada operación: el privilegio de catálogo
+	// coincide con lo esperado y, si NO se espera, la sentencia real se deniega
+	// (cubre también privilegios por columna).
+	rows, err := admin.Query(ctx, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('viajes','auditoria')`)
+	if err != nil {
+		t.Fatalf("listar tablas de viajes y auditoria: %v", err)
+	}
+	reales := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		reales[n] = true
+	}
+	rows.Close()
+	for n := range reales {
+		if _, ok := permisosOpSolicitudes[n]; !ok {
+			t.Errorf("la tabla %s no está en permisosOpSolicitudes: declara su permiso esperado", n)
+		}
+	}
+	for n := range permisosOpSolicitudes {
+		if !reales[n] {
+			t.Errorf("permisosOpSolicitudes declara %s, que no existe", n)
+		}
+	}
+	for tabla, permitido := range permisosOpSolicitudes {
+		var col string
+		esq, nom, _ := strings.Cut(tabla, ".")
+		if err := admin.QueryRow(ctx,
+			`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position LIMIT 1`,
+			esq, nom).Scan(&col); err != nil {
+			t.Fatalf("primera columna de %s: %v", tabla, err)
+		}
+		// UPDATE asigna NULL: leer una columna exigiría SELECT y enmascararía si el
+		// UPDATE mismo está denegado. El permiso se evalúa antes que el NOT NULL.
+		ops := map[string]string{
+			"SELECT": `SELECT 1 FROM ` + tabla,
+			"INSERT": `INSERT INTO ` + tabla + ` DEFAULT VALUES`,
+			"UPDATE": `UPDATE ` + tabla + ` SET ` + col + ` = NULL`,
+			"DELETE": `DELETE FROM ` + tabla,
+		}
+		for op, sql := range ops {
+			esperado := strings.Contains(permitido, op)
+			var tiene bool
+			if err := admin.QueryRow(ctx, `SELECT has_table_privilege('op_solicitudes', $1, $2)`, tabla, op).Scan(&tiene); err != nil {
+				t.Fatalf("privilegio %s sobre %s: %v", op, tabla, err)
+			}
+			if tiene != esperado {
+				t.Errorf("op_solicitudes %s sobre %s: tiene %v, esperado %v (ADR 39)", op, tabla, tiene, esperado)
+			}
+			if !esperado {
+				mustDenegar(t, ctx, poolSol, sql, "permission denied for table "+nom,
+					"op_solicitudes NO debe poder "+op+" en "+tabla)
+			}
+		}
+	}
+	// Ni crear objetos en viajes ni en auditoria; sí entrar (USAGE).
+	for _, esq := range []string{"viajes", "auditoria"} {
+		var usage, create bool
+		if err := admin.QueryRow(ctx,
+			`SELECT has_schema_privilege('op_solicitudes', $1, 'USAGE'), has_schema_privilege('op_solicitudes', $1, 'CREATE')`, esq,
+		).Scan(&usage, &create); err != nil {
+			t.Fatalf("privilegios de op_solicitudes sobre %s: %v", esq, err)
+		}
+		if !usage || create {
+			t.Errorf("op_solicitudes sobre el esquema %s: usage %v (esperado true), create %v (esperado false)", esq, usage, create)
+		}
+	}
+
+	// Nada sobre los demás esquemas de operacion: ni siquiera entra (I1).
+	for _, c := range []struct{ esquema, tabla string }{
+		{"bitacora", "entrada_bitacora"}, {"asignacion", "asignacion_viaje"}, {"roster", "unidad"},
+	} {
+		mustDenegar(t, ctx, poolSol, `SELECT 1 FROM `+c.esquema+`.`+c.tabla,
+			"permission denied for schema "+c.esquema, "op_solicitudes NO debe alcanzar el esquema "+c.esquema)
+		mustDenegar(t, ctx, poolSol, `INSERT INTO `+c.esquema+`.`+c.tabla+` DEFAULT VALUES`,
+			"permission denied for schema "+c.esquema, "op_solicitudes NO debe poder escribir en "+c.esquema)
+	}
+	// catalogos no existe en esta base efímera: el error es "no existe el
+	// esquema", que igualmente prueba que op_solicitudes no lo alcanza por SQL.
+	mustDenegar(t, ctx, poolSol, `SELECT 1 FROM catalogos.cliente`,
+		"catalogos", "op_solicitudes NO debe alcanzar el esquema catalogos")
+	var usageCatalogos bool
+	if err := admin.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace n WHERE n.nspname = 'catalogos'
+		   AND has_schema_privilege('op_solicitudes', n.oid, 'USAGE'))`).Scan(&usageCatalogos); err != nil || usageCatalogos {
+		t.Errorf("op_solicitudes no debe tener USAGE sobre catalogos (err %v, usage %v)", err, usageCatalogos)
+	}
+
+	// Es el único rol que escribe en `solicitudes`: ningún otro tiene USAGE ni
+	// CREATE sobre el esquema, y por tanto ningún privilegio sobre sus tablas.
+	for _, rol := range []string{"op_viajes", "op_asignacion", "op_bitacora", "op_auditoria", "op_roster"} {
+		var usage, create bool
+		if err := admin.QueryRow(ctx,
+			`SELECT has_schema_privilege($1, 'solicitudes', 'USAGE'), has_schema_privilege($1, 'solicitudes', 'CREATE')`, rol,
+		).Scan(&usage, &create); err != nil {
+			t.Fatalf("consultar privilegios de %s sobre solicitudes: %v", rol, err)
+		}
+		if usage || create {
+			t.Errorf("%s no debe tener privilegios sobre el esquema solicitudes (usage %v, create %v)", rol, usage, create)
+		}
+	}
+	// PUBLIC tampoco.
+	var publicoUsa bool
+	if err := admin.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a
+		   WHERE n.nspname = 'solicitudes' AND a.grantee = 0)`).Scan(&publicoUsa); err != nil || publicoUsa {
+		t.Errorf("PUBLIC no debe tener privilegios sobre solicitudes (err %v, publico %v)", err, publicoUsa)
+	}
+}
+
+// permisosOpSolicitudes declara, por tabla de viajes y auditoria, las operaciones
+// que op_solicitudes SÍ tiene (letras completas separadas por coma; vacío = ninguna),
+// según el ADR 39 enmendado (DEC-148 #58): solo INSERT en viaje, destino y outbox;
+// transicion_viaje queda fuera hasta que E10-T8 demuestre que la necesita. Es la
+// única fuente de la prueba: ajustar un permiso es cambiar una línea aquí y su GRANT.
+var permisosOpSolicitudes = map[string]string{
+	"viajes.viaje":                 "INSERT",
+	"viajes.destino":               "INSERT",
+	"viajes.outbox":                "INSERT",
+	"viajes.transicion_viaje":      "",
+	"viajes.condicion_viaje":       "",
+	"viajes.estadia":               "",
+	"viajes.alcance_sujeto":        "",
+	"auditoria.registro_auditoria": "INSERT",
 }
 
 func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql, msg string) {

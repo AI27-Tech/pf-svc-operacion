@@ -19,8 +19,8 @@ GRANT USAGE ON SCHEMA auditoria TO op_auditoria;
 ALTER DEFAULT PRIVILEGES IN SCHEMA auditoria
   GRANT SELECT, INSERT ON TABLES TO op_auditoria;
 -- Solo SELECT/INSERT: la auditoría es probatoria, append-only; sin UPDATE ni
--- DELETE para op_auditoria. (El GRANT de excepción de op_asignacion también
--- escribe aquí dentro de la tx de asignación.)
+-- DELETE para op_auditoria. (Los GRANT de excepción de op_asignacion y
+-- op_solicitudes también escriben aquí, dentro de su tx.)
 
 -- ---------------------------------------------------------------------------
 -- registro_auditoria — bitácora probatoria append-only de los cambios de

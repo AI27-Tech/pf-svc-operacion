@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 2026-11-20 14:50 — esquema `solicitudes`, rol `op_solicitudes` y su excepción de GRANT (E10-T1, ADR 39)
+
+**Para quién:** quien mantiene `operacion` y `pf-svc-core`. No cambia ninguna API: deja listo el esquema donde vivirá el módulo de solicitudes (E10-T2 en adelante) y los privilegios con los que su aprobación creará el viaje en la misma transacción.
+
+**Resumen:** `operacion` pasa a seis esquemas. `op_solicitudes` es dueño de `solicitudes` y es la segunda excepción de GRANT cruzado del sistema: solo `INSERT` en `viajes.viaje`, `viajes.destino`, `viajes.outbox` y `auditoria.registro_auditoria`. Nada de `UPDATE`, `DELETE` ni `SELECT` en `viajes`, y nada sobre `bitacora`, `asignacion`, `roster` ni `catalogos`. El esquema queda sin tablas: el modelo de la solicitud es de E10-T2.
+
+**Cambios:**
+- `migrations/solicitudes/0001_init.sql`, `0002_grants.sql` (nuevos): esquema, rol y partir de cero con `REVOKE`, igual que `viajes/0002_grants.sql`.
+- `migrations/viajes/0008_grants_op_solicitudes.sql`, `migrations/auditoria/0003_grants_op_solicitudes.sql` (nuevos): el tramo de la excepción, otorgado desde el esquema destino, en la fase de grants.
+- `migrations/migrations.go`: `solicitudes` en el embed, en `Orden` (al final) y en `RolPorEsquema`; `core/cmd/migrate` lo recoge solo.
+- `migrations/grants_integration_test.go`: la prueba aplica todas las migraciones (antes solo `0001` y `0002`) y agrega `op_solicitudes`: lo que sí puede y cada negación contra Postgres real, y que ningún otro rol ni `PUBLIC` tiene privilegios sobre `solicitudes`.
+- Revisión del PR #101: las negaciones de `op_solicitudes` se guían por la tabla `permisosOpSolicitudes` (una por tabla de `viajes` y `auditoria`, con SELECT, INSERT, UPDATE y DELETE contra Postgres) y se comprueba que no tenga `CREATE` sobre `viajes` ni `auditoria`; una tabla nueva sin permiso declarado falla la prueba. Los grants no cambian. Enmienda del ADR 39 (DEC-148 #58): `op_solicitudes` recibe `INSERT` en `viajes.destino` (lo que escribe `Crear`) y pierde `transicion_viaje` y su secuencia; se concede solo si E10-T8 la necesita. La migración `0008` se corrigió en su lugar: no estaba en `pf-op-d`/`-q`/`-m`.
+- `internal/viajes/servicio_integration_test.go`, `consultas_integration_test.go`: pre-crean `op_solicitudes` cuando aplican solo las migraciones de `viajes`.
+- Comentarios que decían "única excepción de GRANT cruzado": `migrations/viajes/0002_grants.sql`, `0004_incidencia_estadia.sql`, `migrations/asignacion/0001_init.sql`, `migrations/auditoria/0001_init.sql`, `internal/asignacion/{doc,servicio}.go`, `internal/descargas/servicio.go`, `operacion.go`, `README.md`.
+
 ## 2026-11-20 14:10 — el viaje de V2: nace en APROBADO y la solicitud sale del viaje (tracer.45, ADR 38)
 
 **Para quién:** el panel interno y el portal del cliente (vía `bff` y `pf-svc-core`). Para quien mantiene el servicio: el viaje pierde cuatro estados, el cliente deja de crear viajes y se borra la regla de alcance que filtraba por haber pasado por `APROBADO`.

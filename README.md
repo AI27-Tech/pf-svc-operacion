@@ -9,11 +9,12 @@ deployable `core`.
 Estado: **scaffolding inicial** (prompt 04). Estructura y cableado; sin lógica
 de negocio real todavía. Contrato fijado en `pf-pkg-contracts` v0.1.0-tracer.3.
 
-## Cinco esquemas, cinco roles, una transacción
+## Seis esquemas, seis roles, una transacción
 
-`operacion` es el único servicio con cinco esquemas (`viajes`, `asignacion`,
-`bitacora`, `auditoria`, `roster`) y cinco roles (`op_viajes`, `op_asignacion`,
-`op_bitacora`, `op_auditoria`, `op_roster`), cada uno con su pool. Comparten la
+`operacion` es el único servicio con seis esquemas (`viajes`, `asignacion`,
+`bitacora`, `auditoria`, `roster`, `solicitudes`) y seis roles (`op_viajes`,
+`op_asignacion`, `op_bitacora`, `op_auditoria`, `op_roster`, `op_solicitudes`),
+cada uno con su pool. Comparten la
 **transacción**, no el acoplamiento: la asignación muta la reserva, el estado del
 viaje y la auditoría en una sola operación de negocio (ADR 31; P2). Repartirla
 entre servicios la convierte en sagas que sobrevenden.
@@ -23,11 +24,14 @@ administrado por el `Jefe Operativo`) vive en su propio esquema (ADR 33): es
 dato que cambia poco y tiene su propia administración, separado del libro
 caliente de reservas (`asignacion`) y del agregado del viaje (`viajes`).
 
-**La única excepción de GRANT cruzado del sistema entero** es `op_asignacion`,
-que recibe `USAGE` sobre los otros esquemas de `operacion` —`viajes`, `bitacora`,
+**Hay dos excepciones de GRANT cruzado en el sistema entero.** `op_asignacion`
+recibe `USAGE` sobre los otros esquemas de `operacion` —`viajes`, `bitacora`,
 `auditoria` (escritura) y `roster` (solo lectura, ADR 33)—, nunca sobre
-`catalogos`. Está escrita y comentada en las migraciones. Ningún otro rol de
-ningún otro servicio puede introducir otra sin un ADR.
+`catalogos`. `op_solicitudes` (esquema `solicitudes`, ADR 39) solo hace `INSERT`
+en `viajes.viaje`, `viajes.transicion_viaje`, `viajes.outbox` y
+`auditoria.registro_auditoria`, para crear el viaje al aprobar la solicitud en
+la misma transacción. Están escritas y comentadas en las migraciones. Ningún
+otro rol de ningún otro servicio puede introducir otra sin un ADR.
 
 ## Piezas clave
 
