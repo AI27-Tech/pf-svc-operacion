@@ -212,7 +212,7 @@ func TestGrantsPorTabla(t *testing.T) {
 	defer closeViajes()
 	viajeID := "55555555-5555-5555-5555-555555555555"
 	mustExec(t, ctx, poolViajes,
-		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX')`, viajeID),
+		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, nacio_de_solicitud) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX', false)`, viajeID),
 		"op_viajes debe poder insertar un viaje")
 	mustExec(t, ctx, poolViajes,
 		`UPDATE viajes.viaje SET estado = 'ASIGNADO' WHERE id = '`+viajeID+`'`,
@@ -299,7 +299,7 @@ func TestGrantsPorTabla(t *testing.T) {
 	// Lo que SÍ puede: crear el viaje en APROBADO, su transición inicial, su
 	// evento en el outbox único y el registro de auditoría (INSERT sin RETURNING).
 	mustExec(t, ctx, poolSol,
-		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX')`, solViaje),
+		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, nacio_de_solicitud) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX', false)`, solViaje),
 		"op_solicitudes debe poder crear el viaje")
 	mustExec(t, ctx, poolSol,
 		`INSERT INTO viajes.transicion_viaje (viaje_id, a_estado) VALUES ('`+solViaje+`', 'APROBADO')`,
@@ -312,32 +312,78 @@ func TestGrantsPorTabla(t *testing.T) {
 		`INSERT INTO auditoria.registro_auditoria (modulo, accion) VALUES ('solicitudes', 'aprobar')`,
 		"op_solicitudes debe poder escribir el registro de auditoría")
 
-	// Lo que NO puede en viajes: nada más que INSERT. Una negación por cada
-	// privilegio y tabla del ADR 39.
-	// El UPDATE asigna una constante: leer una columna exigiría SELECT y
-	// enmascararía si el UPDATE mismo está denegado.
-	for tabla, setConstante := range map[string]string{
-		"viaje": "estado = 'APROBADO'", "transicion_viaje": "a_estado = 'x'", "outbox": "tipo = 'x'",
-	} {
-		mustDenegar(t, ctx, poolSol, `UPDATE viajes.`+tabla+` SET `+setConstante,
-			"permission denied for table "+tabla, "op_solicitudes NO debe poder UPDATE en viajes."+tabla)
-		mustDenegar(t, ctx, poolSol, `DELETE FROM viajes.`+tabla,
-			"permission denied for table "+tabla, "op_solicitudes NO debe poder DELETE en viajes."+tabla)
-		mustDenegar(t, ctx, poolSol, `SELECT 1 FROM viajes.`+tabla,
-			"permission denied for table "+tabla, "op_solicitudes NO debe poder SELECT en viajes."+tabla)
+	// Lo que NO puede: guiado por la tabla permisosOpSolicitudes, para CADA tabla de
+	// viajes y auditoria y las cuatro operaciones. Primero, la tabla declarada
+	// cubre todas las tablas reales de los dos esquemas (una tabla nueva obliga a
+	// decidir su permiso aquí). Después, cada operación: el privilegio de catálogo
+	// coincide con lo esperado y, si NO se espera, la sentencia real se deniega
+	// (cubre también privilegios por columna).
+	rows, err := admin.Query(ctx, `SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname IN ('viajes','auditoria')`)
+	if err != nil {
+		t.Fatalf("listar tablas de viajes y auditoria: %v", err)
 	}
-	// Ni la tabla del viaje que no es de su caso de uso (condiciones, alcance, ...).
-	for _, tabla := range []string{"condicion_viaje", "destino", "estadia", "alcance_sujeto"} {
-		mustDenegar(t, ctx, poolSol, `INSERT INTO viajes.`+tabla+` DEFAULT VALUES`,
-			"permission denied for table "+tabla, "op_solicitudes NO debe poder INSERT en viajes."+tabla)
+	reales := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		reales[n] = true
 	}
-	// Auditoría: append-only, y sin lectura.
-	mustDenegar(t, ctx, poolSol, `SELECT 1 FROM auditoria.registro_auditoria`,
-		"permission denied for table registro_auditoria", "op_solicitudes NO debe poder leer la auditoría")
-	mustDenegar(t, ctx, poolSol, `UPDATE auditoria.registro_auditoria SET accion = 'x'`,
-		"permission denied for table registro_auditoria", "op_solicitudes NO debe poder editar la auditoría")
-	mustDenegar(t, ctx, poolSol, `DELETE FROM auditoria.registro_auditoria`,
-		"permission denied for table registro_auditoria", "op_solicitudes NO debe poder borrar la auditoría")
+	rows.Close()
+	for n := range reales {
+		if _, ok := permisosOpSolicitudes[n]; !ok {
+			t.Errorf("la tabla %s no está en permisosOpSolicitudes: declara su permiso esperado", n)
+		}
+	}
+	for n := range permisosOpSolicitudes {
+		if !reales[n] {
+			t.Errorf("permisosOpSolicitudes declara %s, que no existe", n)
+		}
+	}
+	for tabla, permitido := range permisosOpSolicitudes {
+		var col string
+		esq, nom, _ := strings.Cut(tabla, ".")
+		if err := admin.QueryRow(ctx,
+			`SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position LIMIT 1`,
+			esq, nom).Scan(&col); err != nil {
+			t.Fatalf("primera columna de %s: %v", tabla, err)
+		}
+		// UPDATE asigna NULL: leer una columna exigiría SELECT y enmascararía si el
+		// UPDATE mismo está denegado. El permiso se evalúa antes que el NOT NULL.
+		ops := map[string]string{
+			"SELECT": `SELECT 1 FROM ` + tabla,
+			"INSERT": `INSERT INTO ` + tabla + ` DEFAULT VALUES`,
+			"UPDATE": `UPDATE ` + tabla + ` SET ` + col + ` = NULL`,
+			"DELETE": `DELETE FROM ` + tabla,
+		}
+		for op, sql := range ops {
+			esperado := strings.Contains(permitido, op)
+			var tiene bool
+			if err := admin.QueryRow(ctx, `SELECT has_table_privilege('op_solicitudes', $1, $2)`, tabla, op).Scan(&tiene); err != nil {
+				t.Fatalf("privilegio %s sobre %s: %v", op, tabla, err)
+			}
+			if tiene != esperado {
+				t.Errorf("op_solicitudes %s sobre %s: tiene %v, esperado %v (ADR 39)", op, tabla, tiene, esperado)
+			}
+			if !esperado {
+				mustDenegar(t, ctx, poolSol, sql, "permission denied for table "+nom,
+					"op_solicitudes NO debe poder "+op+" en "+tabla)
+			}
+		}
+	}
+	// Ni crear objetos en viajes ni en auditoria; sí entrar (USAGE).
+	for _, esq := range []string{"viajes", "auditoria"} {
+		var usage, create bool
+		if err := admin.QueryRow(ctx,
+			`SELECT has_schema_privilege('op_solicitudes', $1, 'USAGE'), has_schema_privilege('op_solicitudes', $1, 'CREATE')`, esq,
+		).Scan(&usage, &create); err != nil {
+			t.Fatalf("privilegios de op_solicitudes sobre %s: %v", esq, err)
+		}
+		if !usage || create {
+			t.Errorf("op_solicitudes sobre el esquema %s: usage %v (esperado true), create %v (esperado false)", esq, usage, create)
+		}
+	}
 
 	// Nada sobre los demás esquemas de operacion: ni siquiera entra (I1).
 	for _, c := range []struct{ esquema, tabla string }{
@@ -379,6 +425,24 @@ func TestGrantsPorTabla(t *testing.T) {
 		   WHERE n.nspname = 'solicitudes' AND a.grantee = 0)`).Scan(&publicoUsa); err != nil || publicoUsa {
 		t.Errorf("PUBLIC no debe tener privilegios sobre solicitudes (err %v, publico %v)", err, publicoUsa)
 	}
+}
+
+// permisosOpSolicitudes declara, por tabla de viajes y auditoria, las operaciones
+// que op_solicitudes SÍ tiene (letras completas separadas por coma; vacío = ninguna),
+// según el ADR 39: solo INSERT. Es la única fuente de la prueba: ajustar un permiso
+// es cambiar una línea aquí y su GRANT.
+// PENDIENTE (decisión del Lead, enmienda al ADR 39): Crear inserta en viajes.destino
+// y el ADR no concede INSERT ahí; tampoco está claro si la aprobación escribe la fila
+// inicial de transicion_viaje. Hoy los grants son exactamente los del ADR.
+var permisosOpSolicitudes = map[string]string{
+	"viajes.viaje":                 "INSERT",
+	"viajes.transicion_viaje":      "INSERT",
+	"viajes.outbox":                "INSERT",
+	"viajes.destino":               "",
+	"viajes.condicion_viaje":       "",
+	"viajes.estadia":               "",
+	"viajes.alcance_sujeto":        "",
+	"auditoria.registro_auditoria": "INSERT",
 }
 
 func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql, msg string) {
