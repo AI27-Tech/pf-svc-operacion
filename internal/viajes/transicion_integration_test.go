@@ -7,6 +7,7 @@ import (
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/dbtest"
 	"github.com/google/uuid"
 )
 
@@ -92,6 +93,30 @@ func TestClienteCancelaSuViaje(t *testing.T) {
 	}
 	if n := contarEventos(t, ctx, "viaje.estado_cambiado", v.Id.String()); n != 1 {
 		t.Errorf("viaje.estado_cambiado en outbox: got %d, want 1", n)
+	}
+}
+
+// TestTransicionarDevuelvePenalizacion — la respuesta de Transicionar lleva
+// cancelacion_con_penalizacion tomada de nacio_de_solicitud (DEC-148 #14): un
+// viaje de solicitud pagada que el cliente cancela devuelve true.
+func TestTransicionarDevuelvePenalizacion(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+
+	v := crearAprobado(t, ctx, svc)
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET nacio_de_solicitud = true WHERE id = '"+v.Id.String()+"'")
+	cerrar()
+
+	motivo := "ya no necesito el servicio"
+	out, err := svc.Transicionar(ctx, v.Id,
+		operclient.TransicionEntrada{AEstado: operclient.CANCELADOPORCLIENTE, Causa: &motivo},
+		"cliente", "Cliente", v.ClienteId.String())
+	if err != nil {
+		t.Fatalf("cliente cancela: %v", err)
+	}
+	if out.CancelacionConPenalizacion == nil || !*out.CancelacionConPenalizacion {
+		t.Errorf("cancelacion_con_penalizacion: got %v, want true", out.CancelacionConPenalizacion)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/estados"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/roles"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/alcance"
@@ -45,8 +46,8 @@ const paginaMax = 50
 // rolesQuePuedenCrear son los roles que crean un viaje (DEC-026, ADR 38): solo
 // Operación. El cliente crea una solicitud; su viaje nace al aprobarse.
 var rolesQuePuedenCrear = map[string]bool{
-	"jefe_operativo": true,
-	"administrador":  true,
+	string(roles.RolJefeOperativo): true,
+	string(roles.RolAdministrador): true,
 }
 
 // Crear registra un viaje nuevo y publica viaje.creado en la MISMA transacción
@@ -54,7 +55,7 @@ var rolesQuePuedenCrear = map[string]bool{
 // resto de los roles, incluido el cliente, recibe 403. El cliente_id lo manda
 // Operación en el cuerpo (selector de cliente, E8-T11). El id lo genera la app.
 // Un viaje creado aquí no nació de una solicitud: nacio_de_solicitud queda en
-// false (DEC-148 #27).
+// false (DEC-148 #27), y se escribe explícito: la columna no tiene DEFAULT.
 func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, rol string) (*operclient.Viaje, error) {
 	sinPenalizacion := false
 	if !rolesQuePuedenCrear[rol] {
@@ -81,9 +82,9 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 	defer func() { _ = tx.Rollback(ctx) }() // no-op tras commit
 
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, tipo_servicio, creado_en)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		id, string(operclient.APROBADO), *in.ClienteId, in.Origen, in.FechaHoraServicio, in.TipoServicio, ahora,
+		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, tipo_servicio, creado_en, nacio_de_solicitud)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		id, string(operclient.APROBADO), *in.ClienteId, in.Origen, in.FechaHoraServicio, in.TipoServicio, ahora, sinPenalizacion,
 	); err != nil {
 		return nil, fmt.Errorf("operacion: insertar viaje: %w", err)
 	}
