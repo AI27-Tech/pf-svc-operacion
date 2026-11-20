@@ -10,7 +10,7 @@
 -- transacción. Sus privilegios sobre esos esquemas se otorgan desde cada esquema
 -- destino, en la fase de grants (no aquí, para que ningún 0001 referencie un rol
 -- de otro esquema):
---   viajes/0008_grants_op_solicitudes.sql     — USAGE + INSERT en viaje/transicion_viaje/outbox
+--   viajes/0008_grants_op_solicitudes.sql     — USAGE + INSERT en viaje/destino/outbox
 --   auditoria/0003_grants_op_solicitudes.sql  — USAGE + INSERT en registro_auditoria
 -- op_solicitudes NUNCA recibe nada sobre bitacora, asignacion, roster ni catalogos.
 

@@ -302,8 +302,8 @@ func TestGrantsPorTabla(t *testing.T) {
 		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, nacio_de_solicitud) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX', false)`, solViaje),
 		"op_solicitudes debe poder crear el viaje")
 	mustExec(t, ctx, poolSol,
-		`INSERT INTO viajes.transicion_viaje (viaje_id, a_estado) VALUES ('`+solViaje+`', 'APROBADO')`,
-		"op_solicitudes debe poder registrar la transición inicial del viaje")
+		`INSERT INTO viajes.destino (id, viaje_id, orden, nombre) VALUES (gen_random_uuid(), '`+solViaje+`', 1, 'Destino')`,
+		"op_solicitudes debe poder escribir los destinos del viaje")
 	mustExec(t, ctx, poolSol,
 		`INSERT INTO viajes.outbox (evento_id, tipo, agregado_id, ocurrido_en, payload)
 		 VALUES (gen_random_uuid(), 'viaje.creado', '`+solViaje+`', now(), '{}'::jsonb)`,
@@ -429,16 +429,14 @@ func TestGrantsPorTabla(t *testing.T) {
 
 // permisosOpSolicitudes declara, por tabla de viajes y auditoria, las operaciones
 // que op_solicitudes SÍ tiene (letras completas separadas por coma; vacío = ninguna),
-// según el ADR 39: solo INSERT. Es la única fuente de la prueba: ajustar un permiso
-// es cambiar una línea aquí y su GRANT.
-// PENDIENTE (decisión del Lead, enmienda al ADR 39): Crear inserta en viajes.destino
-// y el ADR no concede INSERT ahí; tampoco está claro si la aprobación escribe la fila
-// inicial de transicion_viaje. Hoy los grants son exactamente los del ADR.
+// según el ADR 39 enmendado (DEC-148 #58): solo INSERT en viaje, destino y outbox;
+// transicion_viaje queda fuera hasta que E10-T8 demuestre que la necesita. Es la
+// única fuente de la prueba: ajustar un permiso es cambiar una línea aquí y su GRANT.
 var permisosOpSolicitudes = map[string]string{
 	"viajes.viaje":                 "INSERT",
-	"viajes.transicion_viaje":      "INSERT",
+	"viajes.destino":               "INSERT",
 	"viajes.outbox":                "INSERT",
-	"viajes.destino":               "",
+	"viajes.transicion_viaje":      "",
 	"viajes.condicion_viaje":       "",
 	"viajes.estadia":               "",
 	"viajes.alcance_sujeto":        "",
