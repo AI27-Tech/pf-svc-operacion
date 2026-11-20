@@ -42,34 +42,26 @@ func NewServicio(tx BeginTx, pub *outbox.Publisher) *Servicio {
 // shortcut: tamaño fijo; hacerlo configurable si el panel lo pide.
 const paginaMax = 50
 
-// rolCliente es el rol del usuario de audiencia Cliente (DEC-026/DEC-054). Un
-// cliente crea en SOLICITADO y su cliente_id se deriva del tenant (DEC-112).
-const rolCliente = "cliente"
+// rolesQuePuedenCrear son los roles que crean un viaje (DEC-026, ADR 38): solo
+// Operación. El cliente crea una solicitud; su viaje nace al aprobarse.
+var rolesQuePuedenCrear = map[string]bool{
+	"jefe_operativo": true,
+	"administrador":  true,
+}
 
 // Crear registra un viaje nuevo y publica viaje.creado en la MISMA transacción
-// (P17). El estado inicial lo fija el rol del creador (DEC-026): `cliente` crea
-// en SOLICITADO (pendiente de aprobación); un rol interno crea en APROBADO. El
-// cliente_id de un viaje de cliente se deriva de su tenant (DEC-112: para un
-// usuario de audiencia Cliente, tenant_id == cliente_id), no del cuerpo: el
-// cliente no captura su propio id (DEC-112 #5). Un rol interno sí lo manda en el
-// cuerpo (elige el cliente en el selector, E8-T11). El id lo genera la app.
-func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, rol, tenant string) (*operclient.Viaje, error) {
-	if rol == rolCliente {
-		// El cliente no captura su cliente_id; se deriva del tenant del token. Un
-		// cliente_id en el cuerpo se ignora (no puede crear viajes de otro cliente).
-		// shortcut: la igualdad tenant==cliente_id (DEC-112) es correcta en lógica
-		// pero su blindaje end-to-end depende de la semilla de tenants, del alta que
-		// fije identidad.tenant.id == catalogos.cliente.id, y de DEC-045. Revisar
-		// cuando esas piezas existan.
-		tid, err := uuid.Parse(tenant)
-		if err != nil {
-			return nil, platformerrors.NewValidacion("operacion: tenant del cliente inválido en el token")
-		}
-		cid := operclient.Id(tid)
-		in.ClienteId = &cid
+// (P17). El viaje siempre nace en APROBADO (ADR 38) y solo lo crea Operación; el
+// resto de los roles, incluido el cliente, recibe 403. El cliente_id lo manda
+// Operación en el cuerpo (selector de cliente, E8-T11). El id lo genera la app.
+// Un viaje creado aquí no nació de una solicitud: nacio_de_solicitud queda en
+// false (DEC-148 #27).
+func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, rol string) (*operclient.Viaje, error) {
+	sinPenalizacion := false
+	if !rolesQuePuedenCrear[rol] {
+		return nil, platformerrors.NewProhibido("operacion: el rol %q no crea viajes", rol)
 	}
 	if in.ClienteId == nil {
-		// Rol interno sin cliente en el cuerpo: el operador debe elegir el cliente.
+		// El operador debe elegir el cliente.
 		return nil, platformerrors.NewValidacion("operacion: cliente_id es obligatorio")
 	}
 	if len(in.Destinos) == 0 {
@@ -79,7 +71,6 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 		return nil, platformerrors.NewValidacion("operacion: origen es obligatorio")
 	}
 
-	estado := estadoInicialPara(rol)
 	id := uuid.New()
 	ahora := time.Now().UTC()
 
@@ -92,7 +83,7 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, tipo_servicio, creado_en)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		id, string(estado), *in.ClienteId, in.Origen, in.FechaHoraServicio, in.TipoServicio, ahora,
+		id, string(operclient.APROBADO), *in.ClienteId, in.Origen, in.FechaHoraServicio, in.TipoServicio, ahora,
 	); err != nil {
 		return nil, fmt.Errorf("operacion: insertar viaje: %w", err)
 	}
@@ -116,7 +107,7 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 		AgregadoID: id.String(), // clave de orden = viaje_id
 		Payload: map[string]any{
 			"viaje_id":   id.String(),
-			"estado":     string(estado),
+			"estado":     string(operclient.APROBADO),
 			"cliente_id": in.ClienteId.String(),
 			"origen":     in.Origen,
 			"creado_en":  ahora,
@@ -127,7 +118,7 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 
 	// viaje.mensajeria_habilitada en la MISMA tx (DEC-016 #1): la conversación del
 	// viaje se habilita al crearlo, sin importar el estado inicial, para que el
-	// cliente pueda escribir desde que existe la solicitud. mensajeria lo consume
+	// cliente pueda escribir desde que existe el viaje. mensajeria lo consume
 	// para crear la conversación idempotentemente (E3-T1); por eso lleva el
 	// cliente_id, que acota la conversación (DEC-045 #8). Forma del payload a mano:
 	// no hay struct generado para los eventos viaje.* (misma brecha de contrato).
@@ -150,22 +141,15 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 
 	return &operclient.Viaje{
 		Id:                id,
-		Estado:            estado,
+		Estado:            operclient.APROBADO,
 		ClienteId:         in.ClienteId,
 		Origen:            in.Origen,
 		Destinos:          in.Destinos,
 		FechaHoraServicio: in.FechaHoraServicio,
 		CreadoEn:          ahora,
+		// Creado por Operación: no nació de una solicitud pagada (DEC-148 #27).
+		CancelacionConPenalizacion: &sinPenalizacion,
 	}, nil
-}
-
-// estadoInicialPara aplica DEC-026: solo el rol `cliente` crea en SOLICITADO;
-// los roles internos crean en APROBADO.
-func estadoInicialPara(rol string) operclient.EstadoViaje {
-	if rol == rolCliente {
-		return operclient.SOLICITADO
-	}
-	return operclient.APROBADO
 }
 
 // FijarEta guarda el ETA capturado a mano por el operador (ADR 20 / DEC-007). NO
@@ -234,11 +218,12 @@ func (s *Servicio) leerViaje(ctx context.Context, tx pgx.Tx, id operclient.Id) (
 		fhs       *time.Time
 		eta       *time.Time
 		creado    time.Time
+		penaliza  bool
 	)
 	err := tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en, nacio_de_solicitud
 		   FROM viajes.viaje WHERE id = $1`, id,
-	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
+	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado, &penaliza)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -259,6 +244,8 @@ func (s *Servicio) leerViaje(ctx context.Context, tx pgx.Tx, id operclient.Id) (
 		FechaHoraServicio: fhs,
 		EtaEstimado:       eta,
 		CreadoEn:          creado,
+		// DEC-148 #14: la marca de penalización es el origen del viaje.
+		CancelacionConPenalizacion: &penaliza,
 	}, nil
 }
 
@@ -312,14 +299,14 @@ func (s *Servicio) ListarDeCliente(ctx context.Context, params operclient.Listar
 }
 
 // ListarDeClientes es Listar acotado al alcance del monitoreo (DEC-149): viajes
-// de esos clientes que pasaron por APROBADO. El filtro va en el WHERE, antes del
+// de esos clientes (todo viaje nace en APROBADO, ADR 38). El filtro va en el WHERE, antes del
 // cursor, así que la paginación sigue siendo correcta. Sin clientes no devuelve
 // nada.
 func (s *Servicio) ListarDeClientes(ctx context.Context, params operclient.ListarViajesParams, clientes []uuid.UUID) (*operclient.PaginaViajes, error) {
 	if clientes == nil {
 		clientes = []uuid.UUID{}
 	}
-	return s.listar(ctx, params, "v.cliente_id = ANY($%d::uuid[]) AND "+alcance.SQLPasoPorAprobado, clientes)
+	return s.listar(ctx, params, "v.cliente_id = ANY($%d::uuid[])", clientes)
 }
 
 // HechosAlcance lee lo que la regla de alcance necesita del viaje (DEC-149).
@@ -332,11 +319,8 @@ func (s *Servicio) HechosAlcance(ctx context.Context, id operclient.Id) (alcance
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	err = tx.QueryRow(ctx,
-		`SELECT v.cliente_id, v.estado, EXISTS (
-		        SELECT 1 FROM viajes.transicion_viaje t
-		         WHERE t.viaje_id = v.id AND t.de_estado = 'SOLICITADO' AND t.a_estado = 'CANCELADO')
-		   FROM viajes.viaje v WHERE v.id = $1`, id,
-	).Scan(&h.ClienteID, &h.Estado, &h.CanceladoDesdeSolicitado)
+		`SELECT cliente_id FROM viajes.viaje WHERE id = $1`, id,
+	).Scan(&h.ClienteID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return h, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -383,7 +367,7 @@ func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesPar
 	}
 	args = append(args, paginaMax+1) // +1 para saber si hay página siguiente
 	q := fmt.Sprintf(
-		`SELECT id, estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		`SELECT id, estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en, nacio_de_solicitud
 		   FROM viajes.viaje v %s ORDER BY creado_en DESC, id DESC LIMIT $%d`, where, n)
 
 	rows, err := tx.Query(ctx, q, args...)
@@ -401,8 +385,9 @@ func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesPar
 			fhs       *time.Time
 			eta       *time.Time
 			creado    time.Time
+			penaliza  bool
 		)
-		if err := rows.Scan(&id, &estado, &clienteID, &origen, &fhs, &eta, &creado); err != nil {
+		if err := rows.Scan(&id, &estado, &clienteID, &origen, &fhs, &eta, &creado, &penaliza); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("operacion: escanear viaje: %w", err)
 		}
@@ -410,6 +395,7 @@ func (s *Servicio) listar(ctx context.Context, params operclient.ListarViajesPar
 		items = append(items, operclient.Viaje{
 			Id: id, Estado: operclient.EstadoViaje(estado), ClienteId: &cid,
 			Origen: origen, FechaHoraServicio: fhs, EtaEstimado: eta, CreadoEn: creado,
+			CancelacionConPenalizacion: &penaliza,
 		})
 		ids = append(ids, id.String())
 	}

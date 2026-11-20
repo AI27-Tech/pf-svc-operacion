@@ -190,8 +190,8 @@ func TestAsignarRequiereAprobado(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	vSolicitado := sembrarViaje(t, ctx, "SOLICITADO", true)
-	if _, err := svc.Asignar(ctx, vSolicitado, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad(t, ctx)}}, "a"); err == nil {
+	vCancelado := sembrarViaje(t, ctx, "CANCELADO_POR_CLIENTE", true)
+	if _, err := svc.Asignar(ctx, vCancelado, operclient.AsignacionEntrada{UnidadesIds: []operclient.Id{unidad(t, ctx)}}, "a"); err == nil {
 		t.Error("asignar un viaje no APROBADO debió fallar")
 	}
 

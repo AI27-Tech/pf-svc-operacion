@@ -185,7 +185,7 @@ func (s *Servicio) Asignar(ctx context.Context, viajeID operclient.Id, in opercl
 // Se permite desde ASIGNADO en adelante y hasta antes de un estado terminal; en
 // vez de enumerar estados (que la máquina puede cambiar), lo expresa con dos
 // condiciones estables: el viaje no es terminal (EsTerminal) y tiene una
-// asignación vigente (lo que por construcción descarta SOLICITADO/APROBADO).
+// asignación vigente (lo que por construcción descarta APROBADO).
 func (s *Servicio) Reasignar(ctx context.Context, viajeID operclient.Id, in operclient.ReasignacionEntrada, actorID string) (*operclient.Asignacion, error) {
 	if len(in.UnidadesIds) == 0 {
 		return nil, platformerrors.NewValidacion("operacion: la reasignación requiere al menos una unidad")
@@ -233,7 +233,7 @@ func (s *Servicio) Reasignar(ctx context.Context, viajeID operclient.Id, in oper
 			return err
 		}
 		// Liberar la asignación vigente. Si no hay ninguna, el viaje nunca fue
-		// asignado: no hay nada que reasignar (descarta SOLICITADO/APROBADO).
+		// asignado: no hay nada que reasignar (descarta APROBADO).
 		var vigenteID uuid.UUID
 		err := tx.QueryRow(ctx,
 			`UPDATE asignacion.asignacion_viaje SET liberada_en = now()
