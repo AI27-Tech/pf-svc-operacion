@@ -4,7 +4,7 @@
 // sobre (unidad_id, ventana); la carrera entre comprobar aptitud y reservar se
 // resuelve DENTRO de esta transacción, nunca con un candado en catalogos.
 //
-// Es el dueño de la ÚNICA excepción de GRANT cruzado del sistema: op_asignacion
+// Es el dueño de la PRIMERA de las dos excepciones de GRANT cruzado del sistema (la otra es op_solicitudes, ADR 39): op_asignacion
 // tiene USAGE sobre viajes/bitacora/auditoria (y lectura sobre roster, ADR 33)
 // para escribir la transición a ASIGNADO, el evento viaje.asignado en
 // viajes.outbox y el registro de auditoría en la MISMA transacción que la

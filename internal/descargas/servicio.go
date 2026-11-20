@@ -9,7 +9,7 @@
 // transacción del rol dueño op_auditoria —que tiene INSERT sobre
 // auditoria.registro_auditoria por diseño (migrations/auditoria/0001_init.sql)—.
 // No se otorga GRANT de escritura a op_viajes ni se abre una segunda excepción
-// de GRANT cruzado (la única es la de op_asignacion, ADR 31/33): el camino es el
+// de GRANT cruzado (solo hay dos: op_asignacion, ADR 31/33, y op_solicitudes, ADR 39): el camino es el
 // rol dueño, sin ADR.
 //
 // La lectura del viaje para la respuesta (su Viaje) corre por SEPARADO sobre el
@@ -127,11 +127,12 @@ func (s *Servicio) leerViaje(ctx context.Context, viajeID operclient.Id) (*operc
 		fhs       *time.Time
 		eta       *time.Time
 		creado    time.Time
+		penaliza  bool
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en, nacio_de_solicitud
 		   FROM viajes.viaje WHERE id = $1`, viajeID,
-	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
+	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado, &penaliza)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", viajeID)
 	}
@@ -154,6 +155,8 @@ func (s *Servicio) leerViaje(ctx context.Context, viajeID operclient.Id) (*operc
 		FechaHoraServicio: fhs,
 		EtaEstimado:       eta,
 		CreadoEn:          creado,
+		// DEC-148 #14: la marca de penalización es el origen del viaje.
+		CancelacionConPenalizacion: &penaliza,
 	}, nil
 }
 

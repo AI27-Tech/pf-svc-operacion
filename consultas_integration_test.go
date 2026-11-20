@@ -45,6 +45,9 @@ func moduloConViajes(t *testing.T, ctx context.Context) *operacion.Module {
 	defer cerrar()
 	dbtest.Exec(t, ctx, admin,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_asignacion') THEN CREATE ROLE op_asignacion LOGIN; END IF; END $$;`)
+	// Igual con op_solicitudes (viajes/0008, ADR 39): lo crea solicitudes/0001.
+	dbtest.Exec(t, ctx, admin,
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_solicitudes') THEN CREATE ROLE op_solicitudes LOGIN; END IF; END $$;`)
 	archivos, err := migrations.ArchivosDe("viajes")
 	if err != nil {
 		t.Fatalf("listar migraciones viajes: %v", err)
@@ -75,35 +78,28 @@ func TestConsultasTransicionarViaje(t *testing.T) {
 	m := moduloConViajes(t, ctx)
 	api := m.Consultas()
 
-	cli := uuid.New()
-	fecha := time.Now().Add(24 * time.Hour).UTC()
-	ctxCliente := auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: cli.String()})
-	v, err := api.CrearViaje(ctxCliente, operclient.CrearViajeEntrada{
-		Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
-	})
-	if err != nil {
-		t.Fatalf("crear viaje: %v", err)
-	}
-
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
+	id := viajeAprobado(t, ctx, api)
 
-	// Legal: SOLICITADO -> APROBADO.
-	out, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO})
+	// Legal: APROBADO -> CANCELADO_POR_CLIENTE; se prueba sobre otro viaje para
+	// dejar este en APROBADO para las ilegales.
+	otro := viajeAprobado(t, ctx, api)
+	out, err := api.TransicionarViaje(ctxJefe, otro, operclient.TransicionEntrada{AEstado: operclient.CANCELADOPORCLIENTE})
 	if err != nil {
-		t.Fatalf("SOLICITADO->APROBADO: %v", err)
+		t.Fatalf("APROBADO->CANCELADO_POR_CLIENTE: %v", err)
 	}
-	if out.Estado != "APROBADO" || out.Id != v.Id {
-		t.Errorf("tras aprobar: got estado %q id %s, want APROBADO id %s", out.Estado, out.Id, v.Id)
+	if out.Estado != operclient.CANCELADOPORCLIENTE || out.Id != otro {
+		t.Errorf("tras cancelar: got estado %q id %s, want CANCELADO_POR_CLIENTE id %s", out.Estado, out.Id, otro)
 	}
 
 	// Ilegal: APROBADO -> EN_DESTINO no es arista. Fachada y HTTP dan 409.
-	_, err = api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO})
+	_, err = api.TransicionarViaje(ctxJefe, id, operclient.TransicionEntrada{AEstado: operclient.ENDESTINO})
 	if got := platformerrors.AsCategory(err).HTTPStatus(); got != 409 {
 		t.Errorf("fachada APROBADO->EN_DESTINO: got status %d (err %v), want 409", got, err)
 	}
 	mux := http.NewServeMux()
 	m.Routes(mux)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/viajes/"+v.Id.String()+"/transiciones", strings.NewReader(`{"a_estado":"EN_DESTINO"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/viajes/"+id.String()+"/transiciones", strings.NewReader(`{"a_estado":"EN_DESTINO"}`))
 	req.Header.Set("Authorization", "Bearer x")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -112,11 +108,11 @@ func TestConsultasTransicionarViaje(t *testing.T) {
 	}
 
 	// Sin claims: no autorizado, y el viaje no se mueve.
-	_, err = api.TransicionarViaje(ctx, v.Id, operclient.TransicionEntrada{AEstado: operclient.CANCELADO})
+	_, err = api.TransicionarViaje(ctx, id, operclient.TransicionEntrada{AEstado: operclient.CANCELADOPORCLIENTE})
 	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoAutorizado {
 		t.Errorf("sin claims: got categoría %v (err %v), want NoAutorizado", got, err)
 	}
-	det, err := api.ObtenerViaje(ctxJefe, v.Id)
+	det, err := api.ObtenerViaje(ctxJefe, id)
 	if err != nil {
 		t.Fatalf("obtener viaje: %v", err)
 	}
@@ -184,19 +180,16 @@ func moduloCompletoCon(t *testing.T, ctx context.Context, d operacion.Deps) *ope
 	return m
 }
 
-// viajeAprobado crea un viaje como cliente y lo aprueba como jefe_operativo.
+// viajeAprobado crea un viaje como jefe_operativo: nace en APROBADO (ADR 38).
 func viajeAprobado(t *testing.T, ctx context.Context, api operacion.ConsultasAPI) operclient.Id {
 	t.Helper()
 	fecha := time.Now().Add(24 * time.Hour).UTC()
-	ctxCliente := auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: uuid.NewString()})
-	v, err := api.CrearViaje(ctxCliente, operclient.CrearViajeEntrada{
-		Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
+	cli := uuid.New()
+	v, err := api.CrearViaje(auth.ContextWithClaims(ctx, claimsJefe), operclient.CrearViajeEntrada{
+		ClienteId: &cli, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
 	})
 	if err != nil {
 		t.Fatalf("crear viaje: %v", err)
-	}
-	if _, err := api.TransicionarViaje(auth.ContextWithClaims(ctx, claimsJefe), v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err != nil {
-		t.Fatalf("aprobar viaje: %v", err)
 	}
 	return v.Id
 }
@@ -492,22 +485,20 @@ func TestConsultasListarUnidades(t *testing.T) {
 	mismoStatus(t, m, err, http.MethodGet, "/api/v1/unidades?cursor=%25%25%25", "", 400)
 }
 
-// TestConsultasCompletarFechaHora: una solicitud sin fecha/hora no se aprueba;
-// el jefe_operativo la completa y entonces sí. Un monitorista recibe 403 y un
-// viaje terminal 409 viaje_en_estado_terminal, igual por fachada y HTTP.
+// TestConsultasCompletarFechaHora: el jefe_operativo completa la fecha/hora de un
+// viaje creado sin ella y el viaje sigue en APROBADO (no es cambio de estado).
+// Un monitorista recibe 403 y un viaje terminal 409 viaje_en_estado_terminal,
+// igual por fachada y HTTP.
 func TestConsultasCompletarFechaHora(t *testing.T) {
 	ctx := context.Background()
 	m := moduloCompleto(t, ctx)
 	api := m.Consultas()
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
 
-	ctxCliente := auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: uuid.NewString()})
-	v, err := api.CrearViaje(ctxCliente, operclient.CrearViajeEntrada{Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}})
+	cli := uuid.New()
+	v, err := api.CrearViaje(ctxJefe, operclient.CrearViajeEntrada{ClienteId: &cli, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}})
 	if err != nil {
 		t.Fatalf("crear viaje: %v", err)
-	}
-	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err == nil {
-		t.Fatal("aprobar sin fecha/hora debió fallar")
 	}
 
 	fecha := time.Date(2026, 11, 20, 15, 30, 0, 0, time.UTC)
@@ -515,11 +506,8 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompletarFechaHora: %v", err)
 	}
-	if out.Id != v.Id || out.Estado != operclient.SOLICITADO || out.FechaHoraServicio == nil || !out.FechaHoraServicio.Equal(fecha) {
-		t.Errorf("viaje: got id %s estado %q fecha %v, want %s SOLICITADO %v", out.Id, out.Estado, out.FechaHoraServicio, v.Id, fecha)
-	}
-	if _, err := api.TransicionarViaje(ctxJefe, v.Id, operclient.TransicionEntrada{AEstado: operclient.APROBADO}); err != nil {
-		t.Fatalf("aprobar con fecha/hora: %v", err)
+	if out.Id != v.Id || out.Estado != operclient.APROBADO || out.FechaHoraServicio == nil || !out.FechaHoraServicio.Equal(fecha) {
+		t.Errorf("viaje: got id %s estado %q fecha %v, want %s APROBADO %v", out.Id, out.Estado, out.FechaHoraServicio, v.Id, fecha)
 	}
 
 	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
@@ -682,17 +670,28 @@ func TestConsultasAislamientoCliente(t *testing.T) {
 		return auth.ContextWithClaims(ctx, &auth.Claims{Subject: "cli-" + tenant, Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: tenant})
 	}
 	fecha := time.Now().Add(24 * time.Hour).UTC()
-	crear := func(c context.Context) operclient.Id {
-		v, err := api.CrearViaje(c, operclient.CrearViajeEntrada{
-			Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
+	// Solo Operación crea viajes (ADR 38): el cliente del viaje se elige en el cuerpo.
+	crear := func(tenant string) operclient.Id {
+		cli := uuid.MustParse(tenant)
+		v, err := api.CrearViaje(auth.ContextWithClaims(ctx, claimsJefe), operclient.CrearViajeEntrada{
+			ClienteId: &cli, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
 		})
 		if err != nil {
 			t.Fatalf("crear viaje: %v", err)
 		}
 		return v.Id
 	}
-	ctxA, ctxB := ctxDe(uuid.NewString()), ctxDe(uuid.NewString())
-	viajeA, viajeB := crear(ctxA), crear(ctxB)
+	tenantA, tenantB := uuid.NewString(), uuid.NewString()
+	ctxA, ctxB := ctxDe(tenantA), ctxDe(tenantB)
+	viajeA, viajeB := crear(tenantA), crear(tenantB)
+
+	// El cliente ya no crea viajes: 403.
+	cliX := uuid.New()
+	if _, err := api.CrearViaje(ctxA, operclient.CrearViajeEntrada{
+		ClienteId: &cliX, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
+	}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
+		t.Errorf("cliente crea viaje: err %v, quiere 403", err)
+	}
 
 	ids := func(c context.Context) []operclient.Id {
 		pag, err := api.ListarViajes(c, operclient.ListarViajesParams{})
@@ -717,6 +716,9 @@ func TestConsultasAislamientoCliente(t *testing.T) {
 
 	if _, err := api.ObtenerViaje(ctxA, viajeA); err != nil {
 		t.Errorf("cliente A lee su viaje: %v", err)
+	}
+	if _, err := api.ObtenerViaje(ctxB, viajeB); err != nil {
+		t.Errorf("cliente B lee su viaje: %v", err)
 	}
 	_, err := api.ObtenerViaje(ctxA, viajeB)
 	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoEncontrado {

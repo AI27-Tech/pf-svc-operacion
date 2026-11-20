@@ -55,7 +55,7 @@ import (
 // aunque los módulos compartan proceso y transacción (I1).
 type Pools struct {
 	Viajes     *pgxpool.Pool // rol op_viajes
-	Asignacion *pgxpool.Pool // rol op_asignacion (la única excepción de GRANT cruzado)
+	Asignacion *pgxpool.Pool // rol op_asignacion (excepción de GRANT cruzado, ADR 31/35)
 	Bitacora   *pgxpool.Pool // rol op_bitacora
 	Auditoria  *pgxpool.Pool // rol op_auditoria
 	Roster     *pgxpool.Pool // rol op_roster (roster de unidades, ADR 33)
@@ -1162,20 +1162,18 @@ type consultas struct {
 }
 
 func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error) {
-	// El estado inicial lo fija el rol del creador (DEC-026). Para un cliente, el
-	// cliente_id del viaje se deriva de su tenant (DEC-112: tenant == cliente_id),
-	// no del cuerpo. Rol y tenant viajan en los claims del token, que el
-	// middleware inyecta en el ctx (en core, vía bff).
+	// Solo Operación crea viajes, siempre en APROBADO (ADR 38); el rol viaja en
+	// los claims del token, que el middleware inyecta en el ctx (en core, vía bff).
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: crearViaje sin claims en el contexto")
 	}
-	return c.m.viajes.Crear(ctx, body, claims.Rol, claims.TenantID)
+	return c.m.viajes.Crear(ctx, body, claims.Rol)
 }
 
 // ListarViajes acota la lista al alcance del llamante (DEC-149): Cliente, su
 // tenant; jefe_operativo y administrador, todos; monitoreo, sus clientes
-// efectivos desde APROBADO (filtro en la consulta, no en memoria: el cursor
+// efectivos (filtro en la consulta, no en memoria: el cursor
 // sigue siendo correcto); ejecutivo, reaccion y un rol desconocido, 403. Sin
 // claims (llamada de sistema en core) no se acota.
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/dbtest"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
@@ -38,6 +39,9 @@ func prepara(t *testing.T, ctx context.Context) *viajes.Servicio {
 	// 0002_grants (que le otorga el tramo `viajes` de la excepción) no falle.
 	dbtest.Exec(t, ctx, admin,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_asignacion') THEN CREATE ROLE op_asignacion LOGIN; END IF; END $$;`)
+	// Igual con op_solicitudes (viajes/0008, ADR 39): lo crea solicitudes/0001.
+	dbtest.Exec(t, ctx, admin,
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_solicitudes') THEN CREATE ROLE op_solicitudes LOGIN; END IF; END $$;`)
 
 	archivos, err := migrations.ArchivosDe("viajes")
 	if err != nil {
@@ -76,7 +80,7 @@ func TestCrearObtenerListar(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	// --- Crear como rol interno: estado inicial APROBADO (DEC-026) ---
+	// --- Crear como Operación: el viaje nace en APROBADO (ADR 38) ---
 	clienteID := uuid.New()
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &clienteID,
@@ -85,7 +89,7 @@ func TestCrearObtenerListar(t *testing.T) {
 			{Nombre: "Guadalajara", NumeroEnvio: ptr("ENV-1")},
 			{Nombre: "Tepic"},
 		},
-	}, "jefe_operativo", "")
+	}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("Crear (interno): %v", err)
 	}
@@ -130,20 +134,31 @@ func TestCrearObtenerListar(t *testing.T) {
 		t.Errorf("condiciones activas: got %d, want 0", len(det.CondicionesActivas))
 	}
 
-	// --- Crear como cliente: estado inicial SOLICITADO (DEC-026); el cliente_id
-	// se deriva del tenant del token (DEC-112), no del cuerpo ---
+	// --- Un viaje de Operación no nació de una solicitud: sin penalización
+	// (DEC-148 #27). Obtener y Listar lo reflejan desde la columna. ---
+	if v.CancelacionConPenalizacion == nil || *v.CancelacionConPenalizacion {
+		t.Errorf("cancelacion_con_penalizacion al crear: got %v, want false", v.CancelacionConPenalizacion)
+	}
+	if det.Viaje.CancelacionConPenalizacion == nil || *det.Viaje.CancelacionConPenalizacion {
+		t.Errorf("cancelacion_con_penalizacion al obtener: got %v, want false", det.Viaje.CancelacionConPenalizacion)
+	}
+
+	// --- Un viaje que nació de una solicitud pagada lleva la marca (la pone la
+	// aprobación, E10-T8; aquí se simula con la columna) en Obtener y en Listar. ---
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET nacio_de_solicitud = true WHERE id = '"+v.Id.String()+"'")
+	cerrar()
+	det, err = svc.Obtener(ctx, v.Id)
+	if err != nil || det.Viaje.CancelacionConPenalizacion == nil || !*det.Viaje.CancelacionConPenalizacion {
+		t.Errorf("cancelacion_con_penalizacion de un viaje de solicitud (Obtener): got %+v err %v, want true", det.Viaje.CancelacionConPenalizacion, err)
+	}
+
+	// --- El cliente ya no crea viajes (ADR 38): 403, y no deja nada escrito ---
 	cli := uuid.New()
-	v2, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
-		Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "cliente", cli.String())
-	if err != nil {
-		t.Fatalf("Crear (cliente): %v", err)
-	}
-	if v2.Estado != operclient.SOLICITADO {
-		t.Errorf("estado inicial cliente: got %q, want SOLICITADO", v2.Estado)
-	}
-	if v2.ClienteId == nil || *v2.ClienteId != cli {
-		t.Errorf("cliente_id derivado del tenant: got %v, want %v", v2.ClienteId, cli)
+	if _, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
+		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
+	}, "cliente"); platformerrors.AsCategory(err) != platformerrors.CategoryProhibido {
+		t.Errorf("Crear (cliente): got %v, want Prohibido", err)
 	}
 
 	// --- Listar filtra por estado: APROBADO contiene v y no v2 ---
@@ -152,22 +167,20 @@ func TestCrearObtenerListar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listar: %v", err)
 	}
-	var vistoV, vistoV2 bool
+	var vistoV, penalizaEnLista bool
 	var destinosDeV int
 	for _, it := range pag.Items {
 		if it.Id == v.Id {
 			vistoV = true
 			destinosDeV = len(it.Destinos)
-		}
-		if it.Id == v2.Id {
-			vistoV2 = true
+			penalizaEnLista = it.CancelacionConPenalizacion != nil && *it.CancelacionConPenalizacion
 		}
 	}
 	if !vistoV {
 		t.Error("Listar(APROBADO) no incluyó el viaje aprobado")
 	}
-	if vistoV2 {
-		t.Error("Listar(APROBADO) incluyó un viaje SOLICITADO")
+	if !penalizaEnLista {
+		t.Error("Listar: cancelacion_con_penalizacion de un viaje de solicitud debió ser true")
 	}
 	if destinosDeV != 2 {
 		t.Errorf("Listar: destinos del viaje aprobado: got %d, want 2", destinosDeV)
@@ -182,14 +195,14 @@ func TestCrearValidaciones(t *testing.T) {
 	// Rol interno sin cliente_id → inválido (el operador debe elegir el cliente).
 	if _, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "jefe_operativo", ""); err == nil {
+	}, "jefe_operativo"); err == nil {
 		t.Error("Crear interno sin cliente_id debió fallar")
 	}
 
-	// Sin destinos → inválido (cliente, cliente_id derivado del tenant).
+	// Sin destinos → inválido.
 	if _, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
-		Origen: "O",
-	}, "cliente", cli.String()); err == nil {
+		ClienteId: &cli, Origen: "O",
+	}, "jefe_operativo"); err == nil {
 		t.Error("Crear sin destinos debió fallar")
 	}
 
@@ -206,7 +219,7 @@ func TestFijarEta(t *testing.T) {
 
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "jefe_operativo", "")
+	}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}
@@ -257,7 +270,7 @@ func TestFijarEtaRechazos(t *testing.T) {
 	cli := uuid.New()
 	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
 		ClienteId: &cli, Origen: "O", Destinos: []operclient.Destino{{Nombre: "D"}},
-	}, "jefe_operativo", "")
+	}, "jefe_operativo")
 	if err != nil {
 		t.Fatalf("Crear: %v", err)
 	}
