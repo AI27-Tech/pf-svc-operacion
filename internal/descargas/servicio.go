@@ -127,11 +127,12 @@ func (s *Servicio) leerViaje(ctx context.Context, viajeID operclient.Id) (*operc
 		fhs       *time.Time
 		eta       *time.Time
 		creado    time.Time
+		penaliza  bool
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en, nacio_de_solicitud
 		   FROM viajes.viaje WHERE id = $1`, viajeID,
-	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado)
+	).Scan(&estado, &clienteID, &origen, &fhs, &eta, &creado, &penaliza)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", viajeID)
 	}
@@ -154,6 +155,8 @@ func (s *Servicio) leerViaje(ctx context.Context, viajeID operclient.Id) (*operc
 		FechaHoraServicio: fhs,
 		EtaEstimado:       eta,
 		CreadoEn:          creado,
+		// DEC-148 #14: la marca de penalización es el origen del viaje.
+		CancelacionConPenalizacion: &penaliza,
 	}, nil
 }
 

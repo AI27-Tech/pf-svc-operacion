@@ -69,8 +69,8 @@ func sembrarViaje(t *testing.T, ctx context.Context, estado string, conFecha boo
 	}
 	dbtest.Exec(t, ctx, admin, "SET search_path TO viajes")
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, creado_en)
-		 VALUES ($1, $2, $3, 'Origen', $4, now())`,
+		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, creado_en, nacio_de_solicitud)
+		 VALUES ($1, $2, $3, 'Origen', $4, now(), false)`,
 		id, estado, uuid.New(), fecha,
 	); err != nil {
 		t.Fatalf("sembrar viaje: %v", err)
