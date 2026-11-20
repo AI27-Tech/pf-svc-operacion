@@ -55,7 +55,7 @@ import (
 // aunque los módulos compartan proceso y transacción (I1).
 type Pools struct {
 	Viajes     *pgxpool.Pool // rol op_viajes
-	Asignacion *pgxpool.Pool // rol op_asignacion (la única excepción de GRANT cruzado)
+	Asignacion *pgxpool.Pool // rol op_asignacion (excepción de GRANT cruzado, ADR 31/35)
 	Bitacora   *pgxpool.Pool // rol op_bitacora
 	Auditoria  *pgxpool.Pool // rol op_auditoria
 	Roster     *pgxpool.Pool // rol op_roster (roster de unidades, ADR 33)

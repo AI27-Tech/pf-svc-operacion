@@ -5,9 +5,10 @@
 -- exactamente lo que su caso de uso necesita y nada más.
 --
 -- Esta migración la aplica el rol dueño del esquema (op_viajes), que es quien
--- puede otorgar sobre sus propias tablas. Incluye el tramo `viajes` de la ÚNICA
--- excepción de GRANT del sistema (op_asignacion), porque esos GRANT se otorgan
--- DESDE el esquema destino, no desde asignacion (operacion.md (e), §7.1).
+-- puede otorgar sobre sus propias tablas. Incluye el tramo `viajes` de la primera
+-- de las DOS excepciones de GRANT cruzado del sistema (op_asignacion), porque esos
+-- GRANT se otorgan DESDE el esquema destino, no desde asignacion (operacion.md
+-- (e), §7.1). La segunda (op_solicitudes, ADR 39) está en 0008.
 --
 -- Por qué el REVOKE de abajo: 0001 corre un ALTER DEFAULT PRIVILEGES que otorga
 -- SELECT, INSERT, UPDATE y DELETE sobre toda tabla, ANTES de crear las tablas;

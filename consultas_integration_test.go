@@ -45,6 +45,9 @@ func moduloConViajes(t *testing.T, ctx context.Context) *operacion.Module {
 	defer cerrar()
 	dbtest.Exec(t, ctx, admin,
 		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_asignacion') THEN CREATE ROLE op_asignacion LOGIN; END IF; END $$;`)
+	// Igual con op_solicitudes (viajes/0008, ADR 39): lo crea solicitudes/0001.
+	dbtest.Exec(t, ctx, admin,
+		`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='op_solicitudes') THEN CREATE ROLE op_solicitudes LOGIN; END IF; END $$;`)
 	archivos, err := migrations.ArchivosDe("viajes")
 	if err != nil {
 		t.Fatalf("listar migraciones viajes: %v", err)

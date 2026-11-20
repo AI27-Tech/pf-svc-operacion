@@ -28,7 +28,7 @@ import (
 )
 
 // BeginTx es la frontera transaccional (Unit of Work). La cumple el pool del rol
-// op_asignacion, que por la ÚNICA excepción de GRANT del sistema (ADR 31/35)
+// op_asignacion, que por la excepción de GRANT (ADR 31/35)
 // puede además escribir en viajes y auditoria dentro de la misma tx.
 type BeginTx interface {
 	Begin(ctx context.Context) (pgx.Tx, error)

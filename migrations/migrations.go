@@ -1,13 +1,15 @@
 // Package migrations expone las migraciones SQL de operacion como un embed.FS.
-// Son CINCO esquemas, cada uno con su rol dueño; pf-svc-core y cmd/api aplican
+// Son SEIS esquemas, cada uno con su rol dueño; pf-svc-core y cmd/api aplican
 // cada esquema con su rol (viajes→op_viajes, asignacion→op_asignacion,
-// bitacora→op_bitacora, auditoria→op_auditoria, roster→op_roster, ADR 33).
+// bitacora→op_bitacora, auditoria→op_auditoria, roster→op_roster, ADR 33;
+// solicitudes→op_solicitudes, ADR 38 y 39).
 // platform-go no administra schemas: cada módulo trae los suyos.
 //
 // El orden de aplicación importa: `roster` debe existir antes que `asignacion`
 // (asignacion recibe USAGE de lectura sobre roster, ADR 33), y `asignacion`
-// después de viajes/bitacora/auditoria (su excepción de GRANT los referencia).
-// Orden sugerido: viajes, bitacora, auditoria, roster, asignacion.
+// después de viajes/bitacora/auditoria (su excepción de GRANT los referencia), y
+// lo mismo `solicitudes` (su excepción, ADR 39, referencia viajes y auditoria).
+// Orden sugerido: viajes, bitacora, auditoria, roster, asignacion, solicitudes.
 package migrations
 
 import (
@@ -20,14 +22,14 @@ import (
 
 // FS contiene los archivos .sql por esquema.
 //
-//go:embed viajes/*.sql asignacion/*.sql bitacora/*.sql auditoria/*.sql roster/*.sql
+//go:embed viajes/*.sql asignacion/*.sql bitacora/*.sql auditoria/*.sql roster/*.sql solicitudes/*.sql
 var FS embed.FS
 
 // Orden es la secuencia de esquemas en que se aplican las migraciones. El orden
 // importa por las dependencias de GRANT entre esquemas (ADR 33, §7.1):
 //   - roster antes que asignacion (asignacion recibe SELECT sobre roster),
-//   - viajes, bitacora y auditoria antes que asignacion (su excepción de GRANT
-//     referencia esos esquemas y sus tablas).
+//   - viajes, bitacora y auditoria antes que asignacion y solicitudes (su
+//     excepción de GRANT referencia esos esquemas y sus tablas).
 //
 // La aplicación es EN DOS FASES por versión de archivo: primero todos los 0001
 // (estructura: esquemas, roles, tablas), después todos los 0002 (grants por
@@ -39,17 +41,18 @@ var FS embed.FS
 //
 // Es la fuente única del orden; la consumen el aplicador de core, cmd/api y las
 // pruebas de integración, para no repetir la secuencia en cada llamador.
-var Orden = []string{"viajes", "bitacora", "auditoria", "roster", "asignacion"}
+var Orden = []string{"viajes", "bitacora", "auditoria", "roster", "asignacion", "solicitudes"}
 
 // RolPorEsquema mapea cada esquema a su rol dueño. El aplicador de producción
 // aplica las migraciones de cada esquema con la conexión de ESE rol (I1); las
 // pruebas de integración lo usan para saber qué rol prueba cada esquema.
 var RolPorEsquema = map[string]string{
-	"viajes":     "op_viajes",
-	"bitacora":   "op_bitacora",
-	"auditoria":  "op_auditoria",
-	"roster":     "op_roster",
-	"asignacion": "op_asignacion",
+	"viajes":      "op_viajes",
+	"bitacora":    "op_bitacora",
+	"auditoria":   "op_auditoria",
+	"roster":      "op_roster",
+	"asignacion":  "op_asignacion",
+	"solicitudes": "op_solicitudes",
 }
 
 // ArchivosDe devuelve los .sql de un esquema, ordenados por nombre (0001 antes
