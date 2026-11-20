@@ -205,13 +205,13 @@ func TestGrantsPorTabla(t *testing.T) {
 	defer closeViajes()
 	viajeID := "55555555-5555-5555-5555-555555555555"
 	mustExec(t, ctx, poolViajes,
-		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen) VALUES ('%s', 'SOLICITADO', gen_random_uuid(), 'MX')`, viajeID),
+		fmt.Sprintf(`INSERT INTO viajes.viaje (id, estado, cliente_id, origen) VALUES ('%s', 'APROBADO', gen_random_uuid(), 'MX')`, viajeID),
 		"op_viajes debe poder insertar un viaje")
 	mustExec(t, ctx, poolViajes,
-		`UPDATE viajes.viaje SET estado = 'APROBADO' WHERE id = '`+viajeID+`'`,
+		`UPDATE viajes.viaje SET estado = 'ASIGNADO' WHERE id = '`+viajeID+`'`,
 		"op_viajes debe poder transicionar el estado del viaje")
 	mustExec(t, ctx, poolViajes,
-		`INSERT INTO viajes.transicion_viaje (viaje_id, a_estado) VALUES ('`+viajeID+`', 'APROBADO')`,
+		`INSERT INTO viajes.transicion_viaje (viaje_id, a_estado) VALUES ('`+viajeID+`', 'ASIGNADO')`,
 		"op_viajes debe poder registrar la transición")
 
 	// NO borra: viaje y condicion_viaje se cierran por estado/marca; transicion y

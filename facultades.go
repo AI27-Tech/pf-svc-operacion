@@ -78,8 +78,7 @@ func exigirFacultadInterna(ctx context.Context, op string) error {
 //   - Rol sin la acción (ejecutivo; reaccion fuera de su caso; rol desconocido): 403.
 //   - jefe_operativo, administrador: todos.
 //   - monitorista, supervisor, coordinador: el viaje debe ser de sus clientes
-//     efectivos (proyección de alcance.cambiado) y haber pasado por APROBADO;
-//     si no, 404 igual que si no existiera.
+//     efectivos (proyección de alcance.cambiado); si no, 404 igual que si no existiera.
 //
 // El alcance se busca por claims.Subject: la proyección se indexa por el
 // idp_subject que publica identidad, igual al `sub` del token (DEC-149 #22).

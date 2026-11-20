@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 2026-11-20 14:10 — el viaje de V2: nace en APROBADO y la solicitud sale del viaje (tracer.45, ADR 38)
+
+**Para quién:** el panel interno y el portal del cliente (vía `bff` y `pf-svc-core`). Para quien mantiene el servicio: el viaje pierde cuatro estados, el cliente deja de crear viajes y se borra la regla de alcance que filtraba por haber pasado por `APROBADO`.
+
+**Resumen:** sube el pin a `v0.1.0-tracer.45`. El viaje siempre nace en `APROBADO` y solo lo crea Operación (`jefe_operativo`, `administrador`); el cliente recibe `403`. El cliente solo puede llevar su viaje a `CANCELADO_POR_CLIENTE` (ya no rechaza la escolta, DEC-148 #14). `Viaje.cancelacion_con_penalizacion` sale de la nueva columna `nacio_de_solicitud` (DEC-148 #14, #27); en esta ola ningún camino la pone en `true`, la pondrá la aprobación de la solicitud (E10-T8).
+
+**Cambios:**
+- `go.mod`, `go.sum`: pin a `v0.1.0-tracer.45`. Retirados `SOLICITADO`, `RECHAZADO_POR_AI27`, `RECHAZADO_POR_CLIENTE` y `CANCELADO` (renombrado a `CANCELADO_POR_CLIENTE`).
+- `migrations/viajes/0007_estados_v2.sql` (nuevo, idempotente): reemplaza el `CHECK estado_token_valido` por los 10 estados solo si su definición difiere (no lo suelta en cada arranque) y agrega `nacio_de_solicitud boolean NOT NULL`, sin `DEFAULT` tras rellenar las filas existentes: quien inserte un viaje sin decidir la columna falla. No migra datos: si hay filas con un estado retirado, aborta con un mensaje que nombra cada estado y su conteo (sin `NOT VALID`).
+- `internal/viajes/transicion.go`: el cliente solo va a `CANCELADO_POR_CLIENTE`; se eliminan las guardas de `SOLICITADO → APROBADO` y `→ RECHAZADO_POR_AI27` (y `datosGuarda`). Devuelve `cancelacion_con_penalizacion`.
+- `internal/descargas/servicio.go`: `leerViaje` devuelve `cancelacion_con_penalizacion` como las otras rutas.
+- `internal/viajes/servicio.go`: `Crear` solo para `jefe_operativo` y `administrador` (`roles.Rol*`; otro rol, `403`), siempre en `APROBADO` y con `nacio_de_solicitud = false` explícito; pierde el parámetro `tenant`. Lectura, lista y detalle devuelven `cancelacion_con_penalizacion`. Se elimina la consulta de `SOLICITADO → CANCELADO` de `HechosAlcance`.
+- `internal/alcance/regla.go`: se borran `PasoPorAprobado`, `SQLPasoPorAprobado` y `CanceladoDesdeSolicitado`; `Hechos` queda con `ClienteID`. El monitoreo ve los viajes de sus clientes sin más filtro.
+- `operacion.go`, `facultades.go`, `internal/asignacion/servicio.go`: comentarios y la llamada a `Crear`.
+- Pruebas: `internal/alcance/regla_test.go` (se borra `TestPasoPorAprobado`), `internal/viajes/*_integration_test.go`, `alcance_integration_test.go`, `consultas_integration_test.go`, `internal/asignacion/servicio_integration_test.go`, `migrations/grants_integration_test.go` reescritas sin los estados retirados; casos nuevos: el cliente no crea (403), no rechaza la escolta (403) y la marca de penalización en crear, obtener, listar, transicionar y descargar; 403 de `Crear` para cada rol sin facultad y el positivo de `administrador`; el CHECK de `viaje.estado` coincide con `estados.EstadosViaje`; la columna no tiene `DEFAULT`; la `0007` aborta con estados retirados y se reaplica sin error.
+
 ## 2026-11-18 12:15 — la proyección de alcance se indexa por `idp_subject` (tracer.42, DEC-149 #22)
 
 **Para quién:** el Monitorista, el Supervisor y el Coordinador, que con un IdP real no veían ningún viaje: el token trae el `sub` opaco del IdP y la proyección se indexaba por `sujeto_id` (DEC-072).

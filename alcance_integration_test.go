@@ -66,16 +66,11 @@ func fijarAlcance(t *testing.T, ctx context.Context, c *auth.Claims, clientes ..
 
 func como(c *auth.Claims) context.Context { return auth.ContextWithClaims(context.Background(), c) }
 
-// viajeDe crea un viaje del cliente: como Operación (nace APROBADO) o como el
-// cliente (nace SOLICITADO).
-func viajeDe(t *testing.T, api operacion.ConsultasAPI, cliente uuid.UUID, comoCliente bool) operclient.Id {
+// viajeDe crea un viaje del cliente como Operación: nace en APROBADO (ADR 38).
+func viajeDe(t *testing.T, api operacion.ConsultasAPI, cliente uuid.UUID) operclient.Id {
 	t.Helper()
 	fecha := time.Now().Add(24 * time.Hour).UTC()
-	ctx := como(claimsJefe)
-	if comoCliente {
-		ctx = como(&auth.Claims{Subject: "cli", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: cliente.String()})
-	}
-	v, err := api.CrearViaje(ctx, operclient.CrearViajeEntrada{
+	v, err := api.CrearViaje(como(claimsJefe), operclient.CrearViajeEntrada{
 		ClienteId: &cliente, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}}, FechaHoraServicio: &fecha,
 	})
 	if err != nil {
@@ -122,38 +117,26 @@ func esStatus(t *testing.T, caso string, err error, quiere int) {
 }
 
 // TestAlcanceListarViajes: el filtro va en la consulta y pagina bien. El
-// monitorista ve los viajes de sus clientes que pasaron por APROBADO (52, en dos
-// páginas, sin repetir ni perder), el supervisor la unión, uno sin alcance
-// nada, el jefe todo; ejecutivo y reaccion 403. Para cada viaje, el detalle
-// responde 200 si y solo si la lista lo trae (la regla de Go y la de SQL
-// coinciden).
+// monitorista ve los viajes de sus clientes (52, en dos páginas, sin repetir ni
+// perder; todo viaje nace en APROBADO, ADR 38), el supervisor la unión, uno sin
+// alcance nada, el jefe todo; ejecutivo y reaccion 403. Para cada viaje, el
+// detalle responde 200 si y solo si la lista lo trae.
 func TestAlcanceListarViajes(t *testing.T) {
 	ctx := context.Background()
 	m := moduloAlcance(t, ctx)
 	api := m.Consultas()
 	A, B := uuid.New(), uuid.New()
-	ctxCliA := como(&auth.Claims{Subject: "cli-a", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: A.String()})
 
 	visiblesA := map[operclient.Id]bool{}
 	for range 52 {
-		visiblesA[viajeDe(t, api, A, false)] = true
+		visiblesA[viajeDe(t, api, A)] = true
 	}
-	canceladoTrasAprobar := viajeDe(t, api, A, false)
-	transicionar(t, api, como(claimsJefe), canceladoTrasAprobar, operclient.CANCELADO)
-	visiblesA[canceladoTrasAprobar] = true
-	aprobadoDesdeSolicitud := viajeDe(t, api, A, true)
-	transicionar(t, api, como(claimsJefe), aprobadoDesdeSolicitud, operclient.APROBADO)
-	visiblesA[aprobadoDesdeSolicitud] = true
-
-	solicitado := viajeDe(t, api, A, true)
-	rechazado := viajeDe(t, api, A, true)
-	transicionar(t, api, como(claimsJefe), rechazado, operclient.RECHAZADOPORAI27)
-	canceladoSolicitado := viajeDe(t, api, A, true)
-	transicionar(t, api, ctxCliA, canceladoSolicitado, operclient.CANCELADO)
-	ocultosA := []operclient.Id{solicitado, rechazado, canceladoSolicitado}
+	cancelado := viajeDe(t, api, A)
+	transicionar(t, api, como(claimsJefe), cancelado, operclient.CANCELADOPORCLIENTE)
+	visiblesA[cancelado] = true
 	var deB []operclient.Id
 	for range 3 {
-		deB = append(deB, viajeDe(t, api, B, false))
+		deB = append(deB, viajeDe(t, api, B))
 	}
 
 	fijarAlcance(t, ctx, monA, A)
@@ -176,9 +159,9 @@ func TestAlcanceListarViajes(t *testing.T) {
 		}
 	}
 
-	cancelado := operclient.CANCELADO
-	if ids, _ := todasLasPaginas(t, api, como(monA), &cancelado); len(ids) != 1 || ids[0] != canceladoTrasAprobar {
-		t.Errorf("monitorista con estado=CANCELADO: %v; quiere solo el cancelado tras aprobar", ids)
+	estadoCancelado := operclient.CANCELADOPORCLIENTE
+	if ids, _ := todasLasPaginas(t, api, como(monA), &estadoCancelado); len(ids) != 1 || ids[0] != cancelado {
+		t.Errorf("monitorista con estado=CANCELADO_POR_CLIENTE: %v; quiere solo el cancelado", ids)
 	}
 	if ids, _ := todasLasPaginas(t, api, como(supAB), nil); len(ids) != len(visiblesA)+len(deB) {
 		t.Errorf("supervisor A+B: %d viajes; quiere %d", len(ids), len(visiblesA)+len(deB))
@@ -186,8 +169,8 @@ func TestAlcanceListarViajes(t *testing.T) {
 	if ids, _ := todasLasPaginas(t, api, como(monSin), nil); len(ids) != 0 {
 		t.Errorf("monitorista sin alcance: %d viajes; quiere 0", len(ids))
 	}
-	if ids, _ := todasLasPaginas(t, api, como(claimsJefe), nil); len(ids) != len(visiblesA)+len(ocultosA)+len(deB) {
-		t.Errorf("jefe_operativo: %d viajes; quiere todos (%d)", len(ids), len(visiblesA)+len(ocultosA)+len(deB))
+	if ids, _ := todasLasPaginas(t, api, como(claimsJefe), nil); len(ids) != len(visiblesA)+len(deB) {
+		t.Errorf("jefe_operativo: %d viajes; quiere todos (%d)", len(ids), len(visiblesA)+len(deB))
 	}
 	for _, c := range []*auth.Claims{ejecutivo, reaccion} {
 		_, err := api.ListarViajes(como(c), operclient.ListarViajesParams{})
@@ -195,7 +178,7 @@ func TestAlcanceListarViajes(t *testing.T) {
 	}
 
 	// Paridad lista ↔ detalle sobre todo el juego.
-	todos := append(append([]operclient.Id{}, ocultosA...), deB...)
+	todos := append([]operclient.Id{}, deB...)
 	for id := range visiblesA {
 		todos = append(todos, id)
 	}
@@ -228,7 +211,7 @@ func TestAlcanceDetalleYSubrecursos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("crear unidad de B: %v", err)
 	}
-	vA := viajeDe(t, api, A, false)
+	vA := viajeDe(t, api, A)
 	if _, err := api.AsignarRecursos(como(claimsJefe), vA, operclient.AsignacionEntrada{UnidadesIds: ids(unidadB.Id)}); err != nil {
 		t.Fatalf("asignar unidad prestada: %v", err)
 	}
@@ -296,7 +279,7 @@ func TestAlcanceDetalleYSubrecursos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("crear unidad: %v", err)
 	}
-	vJ := viajeDe(t, api, A, false)
+	vJ := viajeDe(t, api, A)
 	if _, err := api.AsignarRecursos(como(claimsJefe), vJ, operclient.AsignacionEntrada{UnidadesIds: ids(otra.Id)}); err != nil {
 		t.Fatalf("asignar: %v", err)
 	}
@@ -368,7 +351,7 @@ func TestAlcanceProyeccion(t *testing.T) {
 	}
 	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorTabla{}, Atomos: catalogo, Subscriber: sub, Alcances: fake})
 	api := m.Consultas()
-	vA, vB := viajeDe(t, api, A, false), viajeDe(t, api, B, false)
+	vA, vB := viajeDe(t, api, A), viajeDe(t, api, B)
 	// Un sujeto que quedó de una corrida anterior y ya no viene en el snapshot.
 	fijarAlcance(t, ctx, &auth.Claims{Subject: uViejo.String()}, A)
 
