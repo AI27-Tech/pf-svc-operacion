@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-24 15:00 — `solicitudes`: permisos por rol, listado, detalle y avisos (E10-T9, E10-T10, DEC-148 #20, #22, #53 a #57)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Rutas nuevas `GET /api/v1/solicitudes` y `GET /api/v1/solicitudes/{id}`.
+
+**Cambios:**
+- `lectura.go`: `Listar` y `Obtener`. Cliente: las de su organización. `cotizacion` y `administrador`: todas, en cualquier estado. `jefe_operativo`: exactamente las `PAGADO` (su bandeja). Monitorista, supervisor, coordinador, ejecutivo y reacción: `403` en el listado y por id, decidido por el rol antes de tocar la base. Lo que el actor no ve (otra organización; el jefe fuera de `PAGADO`) responde `404`, igual que lo que no existe. Orden de la más nueva a la más antigua, páginas de 50, cursor keyset `(creado_en, id)`, `estado` filtra (400 si no existe).
+- Avisos derivados del estado y la hora, no almacenados: `nueva` (SOLICITADO, a `cotizacion` y `administrador`), `por_vencer` (COTIZADO, desde las 00:00 de `America/Mexico_City` del último día − 3, a `cotizacion`, `administrador` y cliente), `cancelacion_con_penalizacion` (a `cotizacion`/`administrador`), `cotizacion_nueva` y `rechazo_de_ai27` (al cliente). Nada para el jefe operativo; nada por pago ni aprobación (#56).
+- `Actor.puedeVer` es la regla única de visibilidad; `aprobar.go` la usa en lugar de su guarda propia.
+- `armar` es método de `Servicio` (recibe al actor para los avisos) y tolera un rechazo sin fila de histórico.
+- `facultades.go` y `solicitudes.go`: `listarSolicitudes` y `obtenerSolicitud`.
+- Pruebas: alcance por rol en listado y por id, paginación con empates, fronteras de "por vencer" con reloj, avisos por rol, misma fila antes y después de aprobar, cotización vigente, y la tabla rol × acción completa (9 roles × 11 acciones) por HTTP.
+- **Pendiente de este tramo:** los 12 métodos nuevos de `ConsultasAPI` y el histórico (`ListarHistoricoSolicitud`) llegan con E10-T11.
+
 ## 2026-11-24 12:00 — `solicitudes`: aprobar y rechazar, con el viaje creado en la misma transacción (E10-T8, ADR 39, DEC-148 #3, #52, #58)
 
 **Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Cambia comportamiento: rutas nuevas `POST /api/v1/solicitudes/{id}/aprobacion` y `/rechazo`; toda transición de la solicitud queda auditada.
