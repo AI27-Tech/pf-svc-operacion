@@ -414,3 +414,49 @@ func TestCrear(t *testing.T) {
 		}
 	})
 }
+
+// TestCarreraCancelarVsPagarSerializa: dos comandos sobre la misma solicitud
+// COTIZADO (el cliente cancela, cotizacion confirma el pago) compiten N veces.
+// El bloqueo FOR UPDATE de cargar los serializa: o cancela primero y el pago
+// recibe 409, o paga primero y la cancelación sale de PAGADO con marca de
+// penalización. Sin FOR UPDATE ambos leen COTIZADO y el histórico no es una
+// cadena (informe 2026-11-21, 149 de 150 carreras rotas).
+func TestCarreraCancelarVsPagarSerializa(t *testing.T) {
+	ctx, svc := prepara(t)
+	const carreras = 40
+	for i := 0; i < carreras; i++ {
+		id, cliente := sembrar(t, ctx, estados.EstadoSolicitudCotizado)
+		cancelar := func() error {
+			return transicionarId(ctx, svc, id, Cambio{A: estados.EstadoSolicitudCanceladoPorCliente, Disparador: DisparadorCliente, Actor: actorCliente(cliente)})
+		}
+		pagar := func() error {
+			return transicionarId(ctx, svc, id, Cambio{A: estados.EstadoSolicitudPagado, Disparador: DisparadorCotizacion, Actor: Actor{Subject: "cot", Rol: "cotizacion"}})
+		}
+		inicio := make(chan struct{})
+		errs := make(chan error, 2)
+		for _, cmd := range []func() error{cancelar, pagar} {
+			go func() { <-inicio; errs <- cmd() }()
+		}
+		close(inicio)
+		var ok int
+		for j := 0; j < 2; j++ {
+			switch err := <-errs; {
+			case err == nil:
+				ok++
+			case codigoDe(err) == "transicion_no_permitida":
+			default:
+				t.Fatalf("carrera %d: error inesperado: %v", i, err)
+			}
+		}
+		// Dos órdenes serializados son válidos: cancelar primero (el pago recibe 409) o
+		// pagar primero (la cancelación sale de PAGADO con marca de penalización).
+		rows := consulta[string](t, ctx, `SELECT string_agg(de_estado || '>' || a_estado, ',' ORDER BY id) FROM solicitudes.transicion_solicitud WHERE solicitud_id=$1`, id)
+		final := consulta[string](t, ctx, `SELECT estado || '/' || marca_penalizacion FROM solicitudes.solicitud WHERE id=$1`, id)
+		cancelaPrimero := "COTIZADO>CANCELADO_POR_CLIENTE"
+		pagaPrimero := "COTIZADO>PAGADO,PAGADO>CANCELADO_POR_CLIENTE"
+		if !(ok == 1 && rows == cancelaPrimero && final == "CANCELADO_POR_CLIENTE/false") &&
+			!(ok == 2 && rows == pagaPrimero && final == "CANCELADO_POR_CLIENTE/true") {
+			t.Fatalf("carrera %d: %d éxitos, histórico %q, solicitud %s; no es ningún orden serializado", i, ok, rows, final)
+		}
+	}
+}

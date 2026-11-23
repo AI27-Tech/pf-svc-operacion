@@ -207,3 +207,37 @@ func TestRevertirPago(t *testing.T) {
 		}
 	})
 }
+
+// TestPagoSeValidaContraLaUltimaCotizacion: tras recotizar, la vigencia que manda
+// es la de la ÚLTIMA versión (DEC-148 #15, #34). v1 se entregó el 20-nov y vence el
+// 5-dic; v2 se entrega el 1-dic y vence el 16-dic. El 25-nov solo cabe en v1 (se
+// rechaza); el 10-dic solo cabe en v2 (se acepta y el pago apunta a la versión 2).
+func TestPagoSeValidaContraLaUltimaCotizacion(t *testing.T) {
+	ctx, svc := prepara(t)
+	recotizada := func(t *testing.T) uuid.UUID {
+		id := cotizada(t, ctx, svc)
+		svc.ConReloj(func() time.Time { return time.Date(2026, 12, 1, 12, 0, 0, 0, time.UTC) })
+		if _, err := svc.Cotizar(ctx, actorCotizacion, id, cotizacionBase()); err != nil {
+			t.Fatalf("recotizar: %v", err)
+		}
+		return id
+	}
+
+	id := recotizada(t)
+	_, err := svc.ConfirmarPago(ctx, actorCotizacion, id, operclient.PagoEntrada{FechaPago: dia("2026-11-25")})
+	if codigoDe(err) != "fecha_pago_fuera_de_vigencia" {
+		t.Errorf("25-nov (solo dentro de la v1): esperaba 409 fecha_pago_fuera_de_vigencia, obtuve %v", err)
+	}
+	if estadoDe(t, ctx, id) != "COTIZADO" {
+		t.Errorf("el rechazo cambió el estado a %s", estadoDe(t, ctx, id))
+	}
+
+	id = recotizada(t)
+	s, err := svc.ConfirmarPago(ctx, actorCotizacion, id, operclient.PagoEntrada{FechaPago: dia("2026-12-10")})
+	if err != nil || s.Estado != operclient.EstadoSolicitud("PAGADO") {
+		t.Fatalf("10-dic (dentro de la v2): esperaba pago confirmado, obtuve %v / %+v", err, s)
+	}
+	if v := consulta[int](t, ctx, `SELECT cotizacion_version FROM solicitudes.pago_solicitud WHERE solicitud_id=$1`, id); v != 2 {
+		t.Errorf("el pago apunta a la versión %d, quería 2", v)
+	}
+}

@@ -215,3 +215,35 @@ func TestReprogramar(t *testing.T) {
 		}
 	})
 }
+
+// TestCotizarPersisteFechaDelServicio: la fecha de la cotización queda en
+// solicitud.fecha_hora_servicio (se lee de la base, no de la respuesta): E10-T8
+// la usa para la guarda de DEC-010 #2 y para el viaje. Una recotización la cambia.
+func TestCotizarPersisteFechaDelServicio(t *testing.T) {
+	ctx, svc := prepara(t)
+	id, _ := sembrar(t, ctx, estados.EstadoSolicitudSolicitado) // sin fecha del cliente
+	enBase := func() time.Time {
+		p := consulta[*time.Time](t, ctx, `SELECT fecha_hora_servicio FROM solicitudes.solicitud WHERE id=$1`, id)
+		if p == nil {
+			return time.Time{}
+		}
+		return *p
+	}
+	f1 := time.Date(2026, 12, 10, 16, 0, 0, 0, time.UTC)
+	in := cotizacionBase()
+	in.FechaHoraServicio = f1
+	if _, err := svc.Cotizar(ctx, actorCotizacion, id, in); err != nil {
+		t.Fatalf("cotizar: %v", err)
+	}
+	if got := enBase(); !got.Equal(f1) {
+		t.Errorf("tras cotizar, solicitud.fecha_hora_servicio = %v, quería %v", got, f1)
+	}
+	f2 := f1.Add(48 * time.Hour)
+	in.FechaHoraServicio = f2
+	if _, err := svc.Cotizar(ctx, actorCotizacion, id, in); err != nil {
+		t.Fatalf("recotizar: %v", err)
+	}
+	if got := enBase(); !got.Equal(f2) {
+		t.Errorf("tras recotizar, solicitud.fecha_hora_servicio = %v, quería %v", got, f2)
+	}
+}
