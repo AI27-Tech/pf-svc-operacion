@@ -25,6 +25,8 @@ func (m *Module) rutasSolicitudes(mux *http.ServeMux, protegido func(http.Handle
 	mux.Handle("PUT /api/v1/solicitudes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleReprogramarSolicitud)))
 	mux.Handle("POST /api/v1/solicitudes/{id}/rechazo-cotizacion", protegido(http.HandlerFunc(m.handleRechazarCotizacion)))
 	mux.Handle("POST /api/v1/solicitudes/{id}/cancelacion", protegido(http.HandlerFunc(m.handleCancelarSolicitud)))
+	mux.Handle("PUT /api/v1/solicitudes/{id}/pago", protegido(http.HandlerFunc(m.handleConfirmarPago)))
+	mux.Handle("POST /api/v1/solicitudes/{id}/reversa-pago", protegido(http.HandlerFunc(m.handleRevertirPago)))
 }
 
 // actorDe arma el actor de un comando desde los claims. Sin claims es 401: una
@@ -206,4 +208,52 @@ func actorConFacultad(ctx context.Context, op string) (solicitudes.Actor, error)
 		return solicitudes.Actor{}, err
 	}
 	return actorDe(ctx, op)
+}
+
+// handleConfirmarPago atiende PUT /api/v1/solicitudes/{id}/pago.
+func (m *Module) handleConfirmarPago(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.PagoEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.confirmarPago(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+// handleRevertirPago atiende POST /api/v1/solicitudes/{id}/reversa-pago.
+func (m *Module) handleRevertirPago(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.MotivoEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.revertirPago(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+func (m *Module) confirmarPago(ctx context.Context, id operclient.Id, body operclient.PagoEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "confirmarPago")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.ConfirmarPago(ctx, a, id, body)
+}
+
+func (m *Module) revertirPago(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "revertirPago")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.RevertirPago(ctx, a, id, body)
 }

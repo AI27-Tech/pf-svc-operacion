@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-23 18:30 — `solicitudes`: el pago tardío ocurre una sola vez y la fecha de pago puede ser futura (DEC-148 #64, #65)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Cambia comportamiento: un segundo `VENCIDA → PAGADO` en la misma solicitud responde `409 transicion_no_permitida`.
+
+**Cambios:**
+- `pago.go`: `ConfirmarPago` consulta el histórico (`transicion_solicitud`, de `VENCIDA` a `PAGADO`) dentro de la transacción y bajo el `FOR UPDATE` de la solicitud. Se lee el histórico y no `pago_solicitud` porque es append-only, lo escribe solo `transicionar` y conserva la arista aunque el pago se revierta. El contrato (tracer.45) solo define `transicion_no_permitida` y `fecha_pago_fuera_de_vigencia` para este 409; se usó el primero. Se quita el `TODO(producto)` de la repetición; el de la reversa con vigencia terminada (#63) sigue.
+- La fecha del pago futura se acepta mientras caiga en la vigencia (#65); el código ya lo permitía, ahora lo fija una prueba.
+- Pruebas (`pago_test.go`): `TestPagoTardioUnaSolaVez` (segundo pago rechazado sin rastro; un pago normal revertido no consume el tardío) y `TestFechaDePagoFutura`.
+
 ## 2026-11-23 18:00 — `solicitudes`: moneda única MXN y fecha del servicio futura al cotizar y reprogramar (DEC-148 #62, #66)
 
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: cotizar con otra moneda o con fecha pasada responde `400`; reprogramar a una fecha pasada responde `400`.
@@ -14,6 +23,26 @@
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: `Crear` con `fecha_hora_servicio` en el pasado responde `400`.
 
 **Cambios:** `exigeFutura` (`servicio.go`) rechaza una fecha igual o anterior al reloj del servicio; `Crear` la aplica cuando el cliente envía fecha (es opcional). Se compara el instante, que da lo mismo medido en `America/Mexico_City` que en UTC. `TestCrear` usa un reloj fijo y cubre ayer, igual a ahora, un segundo antes, hora en CDMX y un segundo después (se acepta).
+
+## 2026-11-23 11:30 — `solicitudes`: prueba del pago contra la última cotización (revisión de #105)
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento.
+
+**Cambios:** `TestPagoSeValidaContraLaUltimaCotizacion`: tras recotizar, una fecha que solo cabe en la v1 se rechaza y una que solo cabe en la v2 se acepta y el pago apunta a la versión 2; falla si `ConfirmarPago` lee la primera versión. Las mutaciones vivas restantes del informe (`transicionar` sin el dato generado y el motivo de la reversa validado también en `RevertirPago`) quedan vivas por ser redundancias benignas.
+
+## 2026-11-23 10:40 — solicitudes: confirmar el pago, pago tardío y reversa (E10-T6)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Agrega `PUT /api/v1/solicitudes/{id}/pago` y `POST /api/v1/solicitudes/{id}/reversa-pago` (OpenAPI de tracer.45). Se apila sobre E10-T4/T5 (PR #104).
+
+**Resumen:** `cotizacion` y `administrador` confirman el pago (`COTIZADO → PAGADO`); la fecha del pago es obligatoria y debe caer entre el día de entrega de la última cotización y su último día de vigencia, ambos incluidos (`409 fecha_pago_fuera_de_vigencia`); gana la fecha del pago, no la de la confirmación. Desde `VENCIDA` solo se admite la excepción `VENCIDA → PAGADO` con el pago dentro de la vigencia, registrada como `pago_confirmado_tardio`. Solo el `administrador` revierte (`PAGADO → COTIZADO`), con motivo obligatorio; el pago queda marcado como revertido, no borrado.
+
+**Cambios:**
+- `migrations/solicitudes/0005_pago.sql` (nuevo): `pago_solicitud` con un único pago vigente por solicitud (índice único parcial); `UPDATE` solo de `revertido_en`.
+- `internal/solicitudes/pago.go` (nuevo), `servicio.go`: `ConfirmarPago`, `RevertirPago`, y el pago vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades (`confirmarPago`: cotizacion y administrador; `revertirPago`: administrador).
+- Pruebas: `internal/solicitudes/pago_test.go`, `integracion_test.go` (privilegios), `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)`):** qué pasa al revertir cuando la vigencia ya terminó (vence de inmediato o se recotiza) y si `VENCIDA → PAGADO` puede repetirse.
 
 ## 2026-11-23 11:15 — `solicitudes`: prueba de la fecha del servicio al cotizar (revisión de #104)
 

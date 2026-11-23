@@ -199,3 +199,62 @@ func TestCotizacionYRespuestaHTTP(t *testing.T) {
 		t.Fatalf("cancelar: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestPagoHTTP recorre E10-T6 por las rutas del módulo: solo cotizacion y
+// administrador confirman, solo el administrador revierte, y la frontera de vigencia.
+func TestPagoHTTP(t *testing.T) {
+	ctx := context.Background()
+	tenant := uuid.New()
+	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorRoles{tenant: tenant.String()}, Atomos: catalogo})
+	mux := http.NewServeMux()
+	m.Routes(mux)
+
+	rec := llamar(t, mux, http.MethodPost, "/api/v1/solicitudes", "cliente", `{"origen":"CDMX","destinos":[{"nombre":"GDL"}]}`)
+	var s operclient.Solicitud
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &s) != nil {
+		t.Fatalf("crear: %d %s", rec.Code, rec.Body)
+	}
+	ruta := "/api/v1/solicitudes/" + s.Id.String()
+	// El reloj real fija la entrega: la vigencia es de hoy a hoy+15 en CDMX.
+	hoy := time.Now().In(time.FixedZone("mx", -6*3600)).Format(time.DateOnly)
+	if rec := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", "cotizacion", `{"monto":"900","moneda":"MXN","fecha_hora_servicio":"2027-01-10T16:00:00Z"}`); rec.Code != http.StatusOK {
+		t.Fatalf("cotizar: %d %s", rec.Code, rec.Body)
+	}
+	pago := `{"fecha_pago":"` + hoy + `","referencia":"folio 1"}`
+
+	for _, rol := range []string{"cliente", "jefe_operativo", "monitorista", "supervisor", "coordinador", "ejecutivo", "reaccion"} {
+		if got := llamar(t, mux, http.MethodPut, ruta+"/pago", rol, pago).Code; got != http.StatusForbidden {
+			t.Errorf("confirmar pago como %s: %d, quería 403", rol, got)
+		}
+	}
+	if got := llamar(t, mux, http.MethodPut, ruta+"/pago", "cotizacion", `{"fecha_pago":"2000-01-01"}`).Code; got != http.StatusConflict {
+		t.Errorf("fecha antes de la entrega: %d, quería 409", got)
+	}
+	if got := llamar(t, mux, http.MethodPut, ruta+"/pago", "cotizacion", `{}`).Code; got != http.StatusBadRequest {
+		t.Errorf("sin fecha_pago: %d, quería 400", got)
+	}
+	rec = llamar(t, mux, http.MethodPut, ruta+"/pago", "cotizacion", pago)
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &s) != nil || string(s.Estado) != "PAGADO" || s.Pago == nil {
+		t.Fatalf("confirmar pago: %d %s", rec.Code, rec.Body)
+	}
+	if got := llamar(t, mux, http.MethodPut, ruta+"/pago", "cotizacion", pago).Code; got != http.StatusConflict {
+		t.Errorf("confirmar dos veces: %d, quería 409", got)
+	}
+
+	// La reversa es solo del administrador y exige motivo.
+	for _, rol := range []string{"cotizacion", "cliente", "jefe_operativo", "monitorista", "supervisor", "coordinador", "ejecutivo", "reaccion"} {
+		if got := llamar(t, mux, http.MethodPost, ruta+"/reversa-pago", rol, `{"motivo":"error"}`).Code; got != http.StatusForbidden {
+			t.Errorf("reversa como %s: %d, quería 403", rol, got)
+		}
+	}
+	if got := llamar(t, mux, http.MethodPost, ruta+"/reversa-pago", "administrador", `{"motivo":""}`).Code; got != http.StatusBadRequest {
+		t.Errorf("reversa sin motivo: %d, quería 400", got)
+	}
+	rec = llamar(t, mux, http.MethodPost, ruta+"/reversa-pago", "administrador", `{"motivo":"error de captura"}`)
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &s) != nil || string(s.Estado) != "COTIZADO" || s.Pago != nil {
+		t.Fatalf("reversa: %d %s", rec.Code, rec.Body)
+	}
+	if got := llamar(t, mux, http.MethodPost, ruta+"/reversa-pago", "administrador", `{"motivo":"otra vez"}`).Code; got != http.StatusConflict {
+		t.Errorf("reversa fuera de PAGADO: %d, quería 409", got)
+	}
+}

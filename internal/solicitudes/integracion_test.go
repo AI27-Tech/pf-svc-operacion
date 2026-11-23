@@ -320,6 +320,11 @@ func TestPrivilegiosDeOpSolicitudes(t *testing.T) {
 	deniega(`UPDATE solicitudes.transicion_solicitud SET motivo = 'x' WHERE solicitud_id = $1`)
 	deniega(`DELETE FROM solicitudes.transicion_solicitud WHERE solicitud_id = $1`)
 	deniega(`DELETE FROM solicitudes.outbox WHERE agregado_id = $1::text`)
+	deniega(`UPDATE solicitudes.cotizacion SET moneda = 'USD' WHERE solicitud_id = $1`)
+	deniega(`DELETE FROM solicitudes.cotizacion WHERE solicitud_id = $1`)
+	deniega(`UPDATE solicitudes.pago_solicitud SET fecha_pago = now() WHERE solicitud_id = $1`)
+	deniega(`DELETE FROM solicitudes.pago_solicitud WHERE solicitud_id = $1`)
+	deniega(`UPDATE solicitudes.reprogramacion_solicitud SET motivo = 'x' WHERE solicitud_id = $1`)
 	if _, err := pool.Exec(ctx, `UPDATE solicitudes.solicitud SET fecha_hora_servicio = now() WHERE id = $1`, id); err != nil {
 		t.Errorf("fecha_hora_servicio sí se puede actualizar: %v", err)
 	}

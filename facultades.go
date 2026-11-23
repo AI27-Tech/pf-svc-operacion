@@ -36,6 +36,10 @@ var facultades = map[string][]roles.Rol{
 	"reprogramarSolicitud": {roles.RolCotizacion, roles.RolAdministrador},
 	"rechazarCotizacion":   {roles.RolCliente},
 	"cancelarSolicitud":    {roles.RolCliente},
+	// cotizacion confirma el pago (el administrador hereda); solo el administrador
+	// lo revierte (DEC-148 #37).
+	"confirmarPago": {roles.RolCotizacion, roles.RolAdministrador},
+	"revertirPago":  {roles.RolAdministrador},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
 	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }
