@@ -41,6 +41,17 @@ func (s *Servicio) ConReloj(f func() time.Time) *Servicio {
 	return s
 }
 
+// exigeFutura rechaza (400) una fecha y hora de servicio que no sea posterior al
+// momento actual del reloj del servicio (DEC-148 #66). Compara instantes: medir
+// "ahora" en America/Mexico_City y en UTC da el mismo resultado; la zona solo
+// cambia cómo se escribe la hora, no cuál es.
+func (s *Servicio) exigeFutura(t time.Time) error {
+	if !t.After(s.ahora()) {
+		return platformerrors.NewValidacion("operacion: la fecha y hora del servicio debe ser posterior al momento actual")
+	}
+	return nil
+}
+
 // fila es la solicitud cargada de la base, con lo que las reglas necesitan.
 type fila struct {
 	ID                uuid.UUID
@@ -151,7 +162,8 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 // Crear registra la solicitud en SOLICITADO y publica solicitud.creada en la
 // MISMA transacción (P17). La organización es la del token (a.TenantID): el
 // cuerpo no la lleva. Origen y al menos un destino son obligatorios (E1-HU-001);
-// la fecha y hora es opcional y se guarda tal cual (DEC-148 #38). El id lo genera
+// la fecha y hora es opcional, se guarda tal cual (DEC-148 #38) y si viene debe ser
+// posterior al momento actual (DEC-148 #66). El id lo genera
 // el módulo y es el que heredará el viaje (DEC-148 #3).
 func (s *Servicio) Crear(ctx context.Context, a Actor, in operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error) {
 	clienteID, err := uuid.Parse(a.TenantID)
@@ -175,6 +187,9 @@ func (s *Servicio) Crear(ctx context.Context, a Actor, in operclient.CrearSolici
 	var fecha *time.Time
 	if in.FechaHoraServicio != nil {
 		t := in.FechaHoraServicio.UTC()
+		if err := s.exigeFutura(t); err != nil {
+			return nil, err
+		}
 		fecha = &t
 	}
 
