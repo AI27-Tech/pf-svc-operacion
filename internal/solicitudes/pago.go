@@ -93,9 +93,9 @@ func (s *Servicio) ConfirmarPago(ctx context.Context, a Actor, id uuid.UUID, in 
 // motivo obligatorio y solo mientras la solicitud siga en PAGADO (DEC-148 #37). El
 // pago queda marcado como revertido, no borrado. La facultad (solo administrador)
 // la aplica la fachada.
-// TODO(producto): si la vigencia ya terminó al revertir, la solicitud queda en
-// COTIZADO con vigencia vencida; si vence de inmediato o se recotiza está
-// pendiente (ADR 38). Hoy solo regresa a COTIZADO.
+// Si la vigencia ya terminó al revertir, la solicitud queda en COTIZADO y el
+// vencimiento automático (VencerVencidas, E10-T7) la cierra en VENCIDA en su
+// siguiente corrida (DEC-148 #63).
 func (s *Servicio) RevertirPago(ctx context.Context, a Actor, id uuid.UUID, in operclient.MotivoEntrada) (*operclient.Solicitud, error) {
 	if strings.TrimSpace(in.Motivo) == "" {
 		return nil, platformerrors.NewValidacion("operacion: el motivo de la reversa es obligatorio")

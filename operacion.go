@@ -132,6 +132,9 @@ type Module struct {
 	// relaySolicitudes drena solicitudes.outbox (solicitud.*). nil sin pool o sin
 	// Deps.BusPublisher.
 	relaySolicitudes worker.Worker
+	// vencimiento cierra en VENCIDA las cotizaciones sin pago cuya vigencia
+	// terminó (E10-T7). nil sin Pools.Solicitudes; no necesita bus.
+	vencimiento worker.Worker
 	// auditoriaConsulta lee la bitácora probatoria para la composición del
 	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
 	auditoriaConsulta *auditoria.ServicioConsulta
@@ -210,6 +213,7 @@ func New(p Pools, d Deps) (*Module, error) {
 	// op_solicitudes); ningún worker cruza esquemas (operacion.md (g)).
 	if p.Solicitudes != nil {
 		m.solicitudes = solicitudes.NewServicio(p.Solicitudes, pub)
+		m.vencimiento = solicitudes.NuevoWorkerVencimiento(m.solicitudes, 0)
 		if d.BusPublisher != nil {
 			m.relaySolicitudes = outbox.NewRelay("outbox-relay:solicitudes", p.Solicitudes, d.BusPublisher, outbox.RelayOpciones{})
 		}
@@ -1080,6 +1084,9 @@ func (m *Module) Workers() []worker.Worker {
 	}
 	if m.relaySolicitudes != nil {
 		ws = append(ws, m.relaySolicitudes)
+	}
+	if m.vencimiento != nil {
+		ws = append(ws, m.vencimiento)
 	}
 	if m.consumidor != nil {
 		ws = append(ws, m.consumidor)
