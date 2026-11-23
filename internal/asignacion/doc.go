@@ -11,7 +11,7 @@
 // reserva (P2). Nunca sobre catalogos.
 //
 // Sub-módulo interno de operacion. NO tiene outbox propio (ADR 35, DEC-068):
-// escribe viaje.asignado/viaje.reasignado en viajes.outbox, el único outbox de
+// escribe viaje.asignado/viaje.reasignado en viajes.outbox, el outbox de
 // la familia viaje.*, para que ADR 29 cumpla el orden por agregado.
 //
 // Scaffolding: sin casos de uso todavía. La aptitud NO gatea (DEC-055): el único

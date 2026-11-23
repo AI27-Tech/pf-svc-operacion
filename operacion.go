@@ -91,8 +91,9 @@ type Deps struct {
 	// o el stub de desarrollo).
 	Verificador auth.Authenticator
 	// BusPublisher es el publicador del bus que usa el Relay de outbox para
-	// drenar los eventos viaje.* del esquema `viajes` (ADR 35, el único outbox de
-	// operacion). Agnóstico al transporte (bus/memory en desarrollo; broker en
+	// drenar los eventos viaje.* del esquema `viajes` (ADR 35) y los solicitud.* del
+	// esquema `solicitudes` (outbox propio, ADR 35 solo unifica viaje.*).
+	// Agnóstico al transporte (bus/memory en desarrollo; broker en
 	// espera de ADR 32). Si es nil, Workers() no arranca el relay: el módulo
 	// escribe eventos a la tabla pero no los publica (arranque standalone sin bus).
 	BusPublisher bus.Publisher
@@ -197,9 +198,10 @@ func New(p Pools, d Deps) (*Module, error) {
 		// Proyección de alcance en el esquema viajes, con op_viajes (DEC-149).
 		alcance: alcance.NuevaProyeccion(p.Viajes),
 	}
-	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
+	// El outbox de la familia viaje.* es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
-	// por la excepción de GRANT). Un solo relay sobre el pool op_viajes lo drena.
+	// por la excepción de GRANT). Un relay sobre el pool op_viajes lo drena; el
+	// módulo solicitudes tiene su propio outbox y su propio relay (más abajo).
 	// Corre con search_path=viajes, igual que el Publisher que ya lo escribe.
 	if d.BusPublisher != nil {
 		m.relay = outbox.NewRelay("outbox-relay:viajes", p.Viajes, d.BusPublisher, outbox.RelayOpciones{})

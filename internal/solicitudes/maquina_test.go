@@ -96,3 +96,53 @@ func TestSoloMaquinaEscribeEstado(t *testing.T) {
 		}
 	}
 }
+
+// TestMetadatosDeAristasADR38 fija disparador, acción, guarda de motivo y marca
+// de cada arista con valores escritos a mano desde el ADR 38 (tabla de
+// transiciones) y el vocabulario de HistoricoSolicitudItem.accion del OpenAPI.
+// Es independiente de `aristas`: si alguien cambia un valor ahí, falla aquí.
+func TestMetadatosDeAristasADR38(t *testing.T) {
+	const (
+		sol  = estados.EstadoSolicitudSolicitado
+		cot  = estados.EstadoSolicitudCotizado
+		pag  = estados.EstadoSolicitudPagado
+		venc = estados.EstadoSolicitudVencida
+		apr  = estados.EstadoSolicitudAprobado
+		rai  = estados.EstadoSolicitudRechazadoPorAi27
+		rcl  = estados.EstadoSolicitudRechazadoPorCliente
+		ccl  = estados.EstadoSolicitudCanceladoPorCliente
+	)
+	esperado := []struct {
+		de, a       estados.EstadoSolicitud
+		disparador  Disparador
+		accion      string
+		exigeMotivo bool
+		marca       bool
+	}{
+		{sol, cot, "cotizacion", "cotizada", false, false},
+		{sol, ccl, "cliente", "cancelada", false, false},
+		{cot, pag, "cotizacion", "pago_confirmado", false, false},
+		{cot, rcl, "cliente", "cotizacion_rechazada", false, false},
+		{cot, ccl, "cliente", "cancelada", false, false},
+		{cot, venc, "sistema", "vencida", false, false},
+		{venc, pag, "cotizacion", "pago_confirmado_tardio", false, false},
+		{pag, cot, "administrador", "pago_revertido", true, false},
+		{pag, apr, "jefe_operativo", "aprobada", false, false},
+		{pag, rai, "jefe_operativo", "rechazada", true, false},
+		{pag, ccl, "cliente", "cancelada", false, true},
+	}
+	if len(aristas) != len(esperado) {
+		t.Fatalf("aristas tiene %d entradas, el ADR 38 tiene %d", len(aristas), len(esperado))
+	}
+	for _, e := range esperado {
+		r, ok := aristas[arista{e.de, e.a}]
+		if !ok {
+			t.Errorf("%s -> %s: falta en aristas", e.de, e.a)
+			continue
+		}
+		if r.disparador != e.disparador || r.accion != e.accion || r.exigeMotivo != e.exigeMotivo || r.marca != e.marca {
+			t.Errorf("%s -> %s: aristas = {%s %s motivo=%v marca=%v}, ADR 38 = {%s %s motivo=%v marca=%v}",
+				e.de, e.a, r.disparador, r.accion, r.exigeMotivo, r.marca, e.disparador, e.accion, e.exigeMotivo, e.marca)
+		}
+	}
+}

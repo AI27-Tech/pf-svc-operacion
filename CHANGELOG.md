@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-23 11:15 — `solicitudes`: prueba de la fecha del servicio al cotizar (revisión de #104)
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento.
+
+**Cambios:** `TestCotizarPersisteFechaDelServicio` lee de la base `solicitud.fecha_hora_servicio` tras cotizar y recotizar; falla si `Cotizar` deja de actualizarla (E10-T8 la lee para la guarda de DEC-010 #2 y para el viaje).
+
 ## 2026-11-23 10:37 — solicitudes: cotizar, recotizar, reprogramar, rechazar la cotización y cancelar (E10-T4, E10-T5)
 
 **Para quién:** quien mantiene `operacion`, `bff` y el panel/portal. Agrega cuatro rutas del OpenAPI de tracer.45: `PUT /api/v1/solicitudes/{id}/cotizacion`, `PUT .../fecha-hora`, `POST .../rechazo-cotizacion` y `POST .../cancelacion`. Se apila sobre E10-T2/T3 (PR #103).
@@ -13,6 +19,16 @@
 - Pruebas: `internal/solicitudes/cotizacion_test.go`, `respuesta_test.go`; `solicitudes_integration_test.go` (HTTP por rol).
 
 **Pendiente de producto (`TODO(producto)` en el código):** catálogo de monedas y límites del monto; cómputo exacto del último día de vigencia.
+
+## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento: cierra los hallazgos de pruebas y comentarios del informe `semantic-review/2026-11-21-pr-103-105-operacion-solicitudes.md`.
+
+**Cambios:**
+- `TestCarreraCancelarVsPagarSerializa`: 40 carreras cancelar vs pagar sobre la misma solicitud; falla si `cargar` pierde `FOR UPDATE` (verificado con la mutación).
+- `TestMetadatosDeAristasADR38`: disparador, acción, guarda de motivo y marca de las 11 aristas con valores escritos a mano desde el ADR 38 y el OpenAPI, independientes de `aristas`.
+- `TestRelayDeSolicitudesEntregaAlBus`: `solicitud.creada` llega al bus por `outbox-relay:solicitudes` con el pool `op_solicitudes`.
+- Comentarios: ya no dicen que el outbox de `viajes` es el único de `operacion` (`operacion.go`, `internal/asignacion/doc.go`); el comentario DEC-060 #2 de `facultades.go` vuelve a `guardarFicha`.
 
 ## 2026-11-23 10:34 — módulo `solicitudes`: máquina de estados y crear la solicitud (E10-T2, E10-T3; ADR 38, DEC-148)
 
