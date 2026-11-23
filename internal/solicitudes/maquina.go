@@ -107,11 +107,18 @@ func (s *Servicio) transicionar(ctx context.Context, tx pgx.Tx, sol *fila, c Cam
 
 	en := s.ahora().UTC()
 	// La marca la fija la arista (PAGADO -> CANCELADO_POR_CLIENTE), nunca el llamador.
-	if _, err := tx.Exec(ctx,
-		`UPDATE solicitudes.solicitud SET estado = $2, marca_penalizacion = $3 WHERE id = $1`,
-		sol.ID, string(c.A), r.marca,
-	); err != nil {
+	// WHERE estado = de: defensa en profundidad tras el FOR UPDATE del llamador. Si
+	// otro camino cambió el estado, no se pisa: 409 en vez de una transición falsa.
+	tag, err := tx.Exec(ctx,
+		`UPDATE solicitudes.solicitud SET estado = $2, marca_penalizacion = $3 WHERE id = $1 AND estado = $4`,
+		sol.ID, string(c.A), r.marca, string(de),
+	)
+	if err != nil {
 		return fmt.Errorf("solicitudes: actualizar estado: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return platformerrors.NewConflictoCodigo("transicion_no_permitida",
+			"operacion: la solicitud ya no está en %s", de)
 	}
 	var marcaHistorico *bool
 	if c.A == estados.EstadoSolicitudCanceladoPorCliente {
