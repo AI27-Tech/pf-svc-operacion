@@ -37,7 +37,11 @@ var facultades = map[string][]roles.Rol{
 	"reprogramarSolicitud": {roles.RolCotizacion, roles.RolAdministrador},
 	"rechazarCotizacion":   {roles.RolCliente},
 	"cancelarSolicitud":    {roles.RolCliente},
-	"guardarFicha":         {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
+	// cotizacion confirma el pago (el administrador hereda); solo el administrador
+	// lo revierte (DEC-148 #37).
+	"confirmarPago": {roles.RolCotizacion, roles.RolAdministrador},
+	"revertirPago":  {roles.RolAdministrador},
+	"guardarFicha":  {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }
 
 // exigirFacultad rechaza sin claims (401) y con un rol fuera de facultades[op] (403).

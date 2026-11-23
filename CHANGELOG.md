@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-23 10:40 — solicitudes: confirmar el pago, pago tardío y reversa (E10-T6)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Agrega `PUT /api/v1/solicitudes/{id}/pago` y `POST /api/v1/solicitudes/{id}/reversa-pago` (OpenAPI de tracer.45). Se apila sobre E10-T4/T5 (PR #104).
+
+**Resumen:** `cotizacion` y `administrador` confirman el pago (`COTIZADO → PAGADO`); la fecha del pago es obligatoria y debe caer entre el día de entrega de la última cotización y su último día de vigencia, ambos incluidos (`409 fecha_pago_fuera_de_vigencia`); gana la fecha del pago, no la de la confirmación. Desde `VENCIDA` solo se admite la excepción `VENCIDA → PAGADO` con el pago dentro de la vigencia, registrada como `pago_confirmado_tardio`. Solo el `administrador` revierte (`PAGADO → COTIZADO`), con motivo obligatorio; el pago queda marcado como revertido, no borrado.
+
+**Cambios:**
+- `migrations/solicitudes/0005_pago.sql` (nuevo): `pago_solicitud` con un único pago vigente por solicitud (índice único parcial); `UPDATE` solo de `revertido_en`.
+- `internal/solicitudes/pago.go` (nuevo), `servicio.go`: `ConfirmarPago`, `RevertirPago`, y el pago vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades (`confirmarPago`: cotizacion y administrador; `revertirPago`: administrador).
+- Pruebas: `internal/solicitudes/pago_test.go`, `integracion_test.go` (privilegios), `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)`):** qué pasa al revertir cuando la vigencia ya terminó (vence de inmediato o se recotiza) y si `VENCIDA → PAGADO` puede repetirse.
+
 ## 2026-11-23 10:37 — solicitudes: cotizar, recotizar, reprogramar, rechazar la cotización y cancelar (E10-T4, E10-T5)
 
 **Para quién:** quien mantiene `operacion`, `bff` y el panel/portal. Agrega cuatro rutas del OpenAPI de tracer.45: `PUT /api/v1/solicitudes/{id}/cotizacion`, `PUT .../fecha-hora`, `POST .../rechazo-cotizacion` y `POST .../cancelacion`. Se apila sobre E10-T2/T3 (PR #103).

@@ -132,6 +132,10 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 	if err != nil {
 		return nil, err
 	}
+	pago, err := pagoVigente(ctx, tx, f.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &operclient.Solicitud{
 		Id:                f.ID,
 		Estado:            operclient.EstadoSolicitud(f.Estado),
@@ -142,6 +146,7 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 		TipoServicio:      f.TipoServicio,
 		Tracto:            f.Tracto,
 		Cotizacion:        cot,
+		Pago:              pago,
 		MarcaPenalizacion: f.Marca,
 		Avisos:            []string{},
 		CreadoEn:          f.CreadoEn,
