@@ -35,6 +35,9 @@ func (a Actor) resolviendo(f *fila) error {
 // servicio, 409 fecha_hora_servicio_requerida (DEC-010 #2). No se escribe
 // transicion_viaje (DEC-148 #58; el viaje que crea Operación tampoco la escribe).
 // La facultad (jefe_operativo y administrador) la aplica la fachada.
+//
+// TODO(arquitectura): enTx toma FOR UPDATE antes de la guarda de visibilidad, así
+// que quien no puede ver la fila la bloquea un instante antes de recibir el 404.
 func (s *Servicio) Aprobar(ctx context.Context, a Actor, id uuid.UUID) (*operclient.Solicitud, error) {
 	return s.enTx(ctx, id, false, a, func(tx pgx.Tx, f *fila) error {
 		if err := a.resolviendo(f); err != nil {
@@ -48,6 +51,9 @@ func (s *Servicio) Aprobar(ctx context.Context, a Actor, id uuid.UUID) (*opercli
 			return platformerrors.NewConflictoCodigo("fecha_hora_servicio_requerida",
 				"operacion: la solicitud no tiene fecha y hora del servicio; defínela antes de aprobar")
 		}
+		// TODO(producto): DEC-148 #66 exige fecha futura al crear, cotizar y reprogramar,
+		// no al aprobar; una solicitud pagada cuya fecha pasó esperando al jefe se
+		// aprueba y crea un viaje en el pasado. Decidir si se bloquea.
 		// El administrador hereda las facultades del jefe operativo (DEC-148 #20): la
 		// arista la origina jefe_operativo, y el actor real queda en el histórico.
 		if err := s.transicionar(ctx, tx, f, Cambio{A: estados.EstadoSolicitudAprobado, Disparador: DisparadorJefeOperativo, Actor: a}); err != nil {
@@ -133,6 +139,12 @@ func (s *Servicio) crearViaje(ctx context.Context, tx pgx.Tx, f *fila) error {
 // El pool de este módulo tiene search_path=solicitudes, así que se apunta a
 // viajes SOLO dentro de esta transacción (set_config local) y se restaura al
 // terminar; si algo falla, el rollback de la transacción lo descarta igual.
+//
+// Es un truco frágil: lo que se publique en esta transacción DESPUÉS de restaurar
+// va a solicitudes.outbox, pero si alguien mueve la restauración o agrega un
+// evento solicitud.* antes de ella, iría a viajes.outbox (el rol tiene INSERT ahí)
+// y su relay lo publicaría sin error. Lo fija TestPublicarEnViajesRestauraElSearchPath.
+// Alternativa si estorba: INSERT directo en viajes.outbox con SQL propio.
 func (s *Servicio) publicarEnViajes(ctx context.Context, tx pgx.Tx, eventos ...outbox.Event) error {
 	var previo string
 	if err := tx.QueryRow(ctx, `SELECT current_setting('search_path')`).Scan(&previo); err != nil {
