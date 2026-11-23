@@ -1,5 +1,18 @@
 # CHANGELOG
 
+## 2026-11-24 20:00 — `solicitudes`: el jefe operativo sin lo comercial, aprobar con fecha pasada y `viaje_id` en la auditoría de `aprobada` (DEC-148 #67 a #71)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Sin ola de contrato: `cotizacion` y `pago` ya son opcionales (nulos) en tracer.45.
+
+**Cambios:**
+- **#67, el jefe operativo no ve nada comercial:** para ese rol, `cotizacion` y `pago` salen `null` en el detalle, el listado, las respuestas de aprobar y rechazar y los métodos de `ConsultasAPI` (misma fachada). La consulta tampoco lee monto, moneda, notas ni `pago_solicitud` para él. En el histórico conserva todas las acciones, estados, actores y motivos, pero ningún objeto `cotizacion` (la lectura de versiones solo trae versión, entrega, vigencia y actor). `cotizacion`, `administrador` y el cliente conservan lo que ya veían. `Actor.veComercial` es una lista de permitidos.
+- **#68, aprobar con la fecha del servicio pasada:** `Aprobar` responde 409 `fecha_hora_servicio_pasada` si esa fecha no es posterior al instante actual del reloj (igual al instante actual también se rechaza, como `exigeFutura`); la solicitud no cambia. El contrato tracer.45 no documenta ese código (ver PR).
+- **#70, auditoría de `aprobada` ligada al viaje:** su fila lleva `viaje_id` (el id de la solicitud) y se escribe después de crear el viaje, dentro del interceptor y de la misma transacción (`Cambio.Tras`). Las demás acciones siguen con `viaje_id` nulo y el id en `detalle`. No hay FK en `registro_auditoria.viaje_id`; el orden lo fija una prueba con un trigger.
+- #69 y #71 solo confirman lo implementado: se quitó el `TODO(producto)` de `cotizacion_nueva` y se citan las decisiones en los comentarios.
+- Pruebas: tabla rol × campo comercial en detalle, listado e histórico; la consulta del jefe no lee lo comercial (con control); aprobar y rechazar del jefe; aprobar en el límite (un segundo antes, mismo instante, un segundo después, en UTC y en Ciudad de México); `viaje_id` solo en `aprobada` y después del viaje; tabla equivalente por `ConsultasAPI`. `TestAprobarCreaElViaje` ahora exige `viaje_id` en lugar de nulo.
+
+**Archivos:** `internal/solicitudes/{servicio,lectura,historico,aprobar,maquina}.go`, `internal/solicitudes/{aprobar_test,seguimiento_test}.go` (nuevo el segundo), `consultas_solicitudes_integration_test.go`, `CHANGELOG.md`.
+
 ## 2026-11-24 18:00 — `solicitudes`: auditoría de cada acción, histórico unificado y los 12 métodos de `ConsultasAPI` (E10-T11, DEC-148 #42)
 
 **Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Ruta nueva `GET /api/v1/solicitudes/{id}/historico`; `ConsultasAPI` gana 12 métodos (firmas de `COSTURAS.md` §2); migración `solicitudes/0007_creado_por.sql`.

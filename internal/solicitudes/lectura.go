@@ -67,6 +67,17 @@ func (a Actor) puedeVer(f *fila) bool {
 	return false
 }
 
+// veComercial dice si el rol ve lo comercial de la solicitud: la cotización
+// (monto, moneda, notas, versiones) y los datos del pago. El jefe operativo no
+// (DEC-148 #67); es lista de permitidos, así un rol nuevo no lo ve por omisión.
+func (a Actor) veComercial() bool {
+	switch a.Rol {
+	case rolCliente, rolCotizacion, rolAdministrador:
+		return true
+	}
+	return false
+}
+
 // exigeAcceso es 403 para un rol sin acceso a solicitudes; se decide por el rol y
 // antes de tocar la base, así no revela si una solicitud existe.
 func (a Actor) exigeAcceso() error {
@@ -187,8 +198,8 @@ func (s *Servicio) Obtener(ctx context.Context, a Actor, id uuid.UUID) (*opercli
 //	cotizacion y administrador: nueva (SOLICITADO), por_vencer, cancelacion_con_penalizacion
 //	cliente: cotizacion_nueva, por_vencer, rechazo_de_ai27
 //
-// Sin aviso por pago confirmado ni por aprobación (#56). Cuándo se apaga cada aviso
-// sigue pendiente del Lead: aquí se apagan solos al cambiar el estado.
+// Sin aviso por pago confirmado ni por aprobación (#56). Cada aviso se apaga solo al
+// cambiar el estado (DEC-148 #69 para `cotizacion_nueva`).
 func (s *Servicio) avisos(a Actor, f *fila, cot *operclient.Cotizacion) []string {
 	out := []string{}
 	porVencer := f.Estado == estados.EstadoSolicitudCotizado && cot != nil &&
@@ -205,8 +216,7 @@ func (s *Servicio) avisos(a Actor, f *fila, cot *operclient.Cotizacion) []string
 			out = append(out, AvisoCancelacionConPenalizacion)
 		}
 	case rolCliente:
-		// TODO(producto): cuándo se apaga "cotización nueva" (DEC-148, pendientes); hoy
-		// dura mientras la solicitud sigue en COTIZADO.
+		// "Cotización nueva" dura mientras la solicitud sigue en COTIZADO (DEC-148 #69).
 		if f.Estado == estados.EstadoSolicitudCotizado {
 			out = append(out, AvisoCotizacionNueva)
 		}

@@ -48,11 +48,16 @@ func (s *Servicio) ConReloj(f func() time.Time) *Servicio {
 // "ahora" en America/Mexico_City y en UTC da el mismo resultado; la zona solo
 // cambia cómo se escribe la hora, no cuál es.
 func (s *Servicio) exigeFutura(t time.Time) error {
-	if !t.After(s.ahora()) {
+	if !s.esFutura(t) {
 		return platformerrors.NewValidacion("operacion: la fecha y hora del servicio debe ser posterior al momento actual")
 	}
 	return nil
 }
+
+// esFutura dice si t es posterior al momento actual del reloj del servicio; la
+// regla de exigeFutura y de la guarda de Aprobar (DEC-148 #66, #68). Igual al
+// instante actual no es futura.
+func (s *Servicio) esFutura(t time.Time) bool { return t.After(s.ahora()) }
 
 // fila es la solicitud cargada de la base, con lo que las reglas necesitan.
 type fila struct {
@@ -146,13 +151,19 @@ func (s *Servicio) enTx(ctx context.Context, id uuid.UUID, delCliente bool, a Ac
 // que le tocan al actor (avisos, lectura.go).
 func (s *Servicio) armar(ctx context.Context, tx pgx.Tx, f *fila, a Actor) (*operclient.Solicitud, error) {
 	cid := operclient.Id(f.ClienteID)
-	cot, err := cotizacionVigente(ctx, tx, f.ID)
-	if err != nil {
-		return nil, err
-	}
-	pago, err := pagoVigente(ctx, tx, f.ID)
-	if err != nil {
-		return nil, err
+	// El jefe operativo no ve nada comercial (DEC-148 #67): ni siquiera se leen la
+	// cotización ni el pago, y el contrato los deja nulos. Los avisos del jefe no
+	// dependen de la cotización (no tiene ninguno).
+	var cot *operclient.Cotizacion
+	var pago *operclient.Pago
+	if a.veComercial() {
+		var err error
+		if cot, err = cotizacionVigente(ctx, tx, f.ID); err != nil {
+			return nil, err
+		}
+		if pago, err = pagoVigente(ctx, tx, f.ID); err != nil {
+			return nil, err
+		}
 	}
 	// El cliente ve el motivo del rechazo de AI27 (DEC-148 #55); nil en otro estado.
 	var motivoRechazo *string

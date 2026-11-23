@@ -133,13 +133,13 @@ func TestAprobarCreaElViaje(t *testing.T) {
 	   AND payload->>'de_estado'='PAGADO' AND payload->>'a_estado'='APROBADO'`, id.String()); n != 1 {
 		t.Errorf("solicitud.estado_cambiado PAGADO→APROBADO = %d, quería 1", n)
 	}
-	// Histórico y auditoría (misma transacción): actor real, sin viaje_id.
+	// Histórico y auditoría (misma transacción): actor real y viaje_id del viaje (DEC-148 #70).
 	if n := consulta[int](t, ctx, `SELECT count(*) FROM solicitudes.transicion_solicitud WHERE solicitud_id=$1 AND accion='aprobada'
 	   AND disparador='jefe_operativo' AND actor_id='jefe-1' AND actor_rol='jefe_operativo'`, id); n != 1 {
 		t.Errorf("histórico de la aprobación = %d, quería 1", n)
 	}
 	if n := consulta[int](t, ctx, `SELECT count(*) FROM auditoria.registro_auditoria WHERE modulo='solicitudes' AND accion='aprobada'
-	   AND actor_id='jefe-1' AND viaje_id IS NULL AND detalle->>'solicitud_id'=$1 AND detalle->>'de_estado'='PAGADO' AND detalle->>'a_estado'='APROBADO'`, id.String()); n != 1 {
+	   AND actor_id='jefe-1' AND viaje_id=$1 AND detalle->>'solicitud_id'=$1::text AND detalle->>'de_estado'='PAGADO' AND detalle->>'a_estado'='APROBADO'`, id); n != 1 {
 		t.Errorf("auditoría de la aprobación = %d, quería 1", n)
 	}
 	// DEC-148 #58: no se escribe transicion_viaje.

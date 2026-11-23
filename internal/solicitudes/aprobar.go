@@ -32,7 +32,10 @@ func (a Actor) resolviendo(f *fila) error {
 //
 // Guardas, en orden: el jefe operativo no ve una solicitud fuera de PAGADO (404);
 // el administrador recibe 409 transicion_no_permitida; sin fecha y hora del
-// servicio, 409 fecha_hora_servicio_requerida (DEC-010 #2). No se escribe
+// servicio, 409 fecha_hora_servicio_requerida (DEC-010 #2); con esa fecha ya pasada
+// (no posterior al instante actual), 409 fecha_hora_servicio_pasada (DEC-148 #68; el
+// contrato tracer.45 no documenta ese código). La auditoría `aprobada` lleva el
+// viaje_id y se escribe después de crear el viaje (DEC-148 #70). No se escribe
 // transicion_viaje (DEC-148 #58; el viaje que crea Operación tampoco la escribe).
 // La facultad (jefe_operativo y administrador) la aplica la fachada.
 //
@@ -51,15 +54,19 @@ func (s *Servicio) Aprobar(ctx context.Context, a Actor, id uuid.UUID) (*opercli
 			return platformerrors.NewConflictoCodigo("fecha_hora_servicio_requerida",
 				"operacion: la solicitud no tiene fecha y hora del servicio; defínela antes de aprobar")
 		}
-		// TODO(producto): DEC-148 #66 exige fecha futura al crear, cotizar y reprogramar,
-		// no al aprobar; una solicitud pagada cuya fecha pasó esperando al jefe se
-		// aprueba y crea un viaje en el pasado. Decidir si se bloquea.
+		// DEC-148 #68 (completa #66): no se aprueba con la fecha del servicio ya pasada;
+		// cotizacion la reprograma y se vuelve a aprobar. Mismo instante que exigeFutura.
+		if !s.esFutura(*f.FechaHoraServicio) {
+			return platformerrors.NewConflictoCodigo("fecha_hora_servicio_pasada",
+				"operacion: la fecha y hora del servicio ya pasó; reprográmala antes de aprobar")
+		}
 		// El administrador hereda las facultades del jefe operativo (DEC-148 #20): la
 		// arista la origina jefe_operativo, y el actor real queda en el histórico.
-		if err := s.transicionar(ctx, tx, f, Cambio{A: estados.EstadoSolicitudAprobado, Disparador: DisparadorJefeOperativo, Actor: a}); err != nil {
-			return err
-		}
-		return s.crearViaje(ctx, tx, f)
+		return s.transicionar(ctx, tx, f, Cambio{
+			A: estados.EstadoSolicitudAprobado, Disparador: DisparadorJefeOperativo, Actor: a,
+			// El viaje nace dentro del interceptor, antes de su fila de auditoría (DEC-148 #70).
+			Tras: func(ctx context.Context, tx pgx.Tx) error { return s.crearViaje(ctx, tx, f) },
+		})
 	})
 }
 
