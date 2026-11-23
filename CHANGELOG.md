@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 2026-11-23 10:37 — solicitudes: cotizar, recotizar, reprogramar, rechazar la cotización y cancelar (E10-T4, E10-T5)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel/portal. Agrega cuatro rutas del OpenAPI de tracer.45: `PUT /api/v1/solicitudes/{id}/cotizacion`, `PUT .../fecha-hora`, `POST .../rechazo-cotizacion` y `POST .../cancelacion`. Se apila sobre E10-T2/T3 (PR #103).
+
+**Resumen:** `cotizacion` y `administrador` cotizan (`SOLICITADO → COTIZADO`), recotizan (versión nueva, sin cambio de estado, vigencia desde la última entrega) y reprograman una solicitud `PAGADO` con motivo obligatorio. El cliente dueño rechaza la cotización (`COTIZADO → RECHAZADO_POR_CLIENTE`) o cancela (`CANCELADO_POR_CLIENTE`, con marca de penalización solo desde `PAGADO`); una solicitud de otra organización responde 404. La vigencia (15 días, `America/Mexico_City`) se calcula al entregar la cotización para guardar `vigente_hasta`; el vencimiento automático no entra (E10-T7).
+
+**Cambios:**
+- `migrations/solicitudes/0004_cotizacion.sql` (nuevo): `cotizacion` (una fila por versión, solo `INSERT`) y `reprogramacion_solicitud` (solo `INSERT`).
+- `internal/solicitudes/cotizacion.go`, `respuesta.go` (nuevos), `servicio.go`: `Cotizar`, `Reprogramar`, `RechazarCotizacion`, `Cancelar` y la cotización vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades por rol.
+- Pruebas: `internal/solicitudes/cotizacion_test.go`, `respuesta_test.go`; `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)` en el código):** catálogo de monedas y límites del monto; cómputo exacto del último día de vigencia.
+
 ## 2026-11-23 10:34 — módulo `solicitudes`: máquina de estados y crear la solicitud (E10-T2, E10-T3; ADR 38, DEC-148)
 
 **Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Agrega la ruta `POST /api/v1/solicitudes` (solo el cliente) y el pool opcional `Pools.Solicitudes`; sin ese pool no se monta nada y el resto del servicio no cambia. `core` debe pasar el pool de `op_solicitudes` con `search_path=solicitudes` (no se toca `pf-svc-core` aquí).

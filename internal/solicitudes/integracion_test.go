@@ -19,6 +19,15 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
+// testCtx abrevia el contexto de las pruebas.
+type testCtx = context.Context
+
+// adminConn abre una conexión de administración.
+func adminConn(t *testing.T, ctx context.Context) (*pgx.Conn, func()) {
+	t.Helper()
+	return dbtest.AdminConn(t, ctx)
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // prepara aplica las migraciones del esquema solicitudes (idempotentes), limpia
