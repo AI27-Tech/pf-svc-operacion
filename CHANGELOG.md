@@ -1,5 +1,26 @@
 # CHANGELOG
 
+## 2026-11-24 13:00 — `solicitudes`: pruebas de la forma de `viaje.*` y del `search_path` al aprobar (revisión de #108)
+
+**Para quién:** quien mantiene `operacion`, `reportes` y `mensajeria`. Sin cambio de comportamiento.
+
+**Cambios:**
+- `aprobar_test.go`: `TestAprobarPublicaLaFormaDeViajesCrear` fija clave por clave el payload, `Version`, `agregado_id` y `ocurrido_en` de `viaje.creado` y `viaje.mensajeria_habilitada` con valores escritos a mano, los mismos que emite `viajes.Crear` (`reportes` lee `creado_en`; `mensajeria`, `viaje_id` y `cliente_id`). `TestPublicarEnViajesRestauraElSearchPath` afirma que un evento publicado después en la misma transacción va a `solicitudes.outbox` y no a `viajes.outbox`.
+- `aprobar.go`: solo comentarios. `TODO(producto)` de aprobar con la fecha del servicio ya pasada (DEC-148 #66 no lo cubre), `TODO(arquitectura)` del bloqueo antes de la guarda de visibilidad, y la fragilidad del `search_path` apuntando a su prueba.
+
+## 2026-11-24 12:00 — `solicitudes`: aprobar y rechazar, con el viaje creado en la misma transacción (E10-T8, ADR 39, DEC-148 #3, #52, #58)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Cambia comportamiento: rutas nuevas `POST /api/v1/solicitudes/{id}/aprobacion` y `/rechazo`; toda transición de la solicitud queda auditada.
+
+**Cambios:**
+- `aprobar.go`: `Aprobar` pasa `PAGADO → APROBADO` y, en la MISMA transacción, inserta el viaje en `APROBADO` con el id de la solicitud (`nacio_de_solicitud = true`, tracto copiado), sus destinos en `viajes.destino` y `viaje.creado` + `viaje.mensajeria_habilitada` en `viajes.outbox` (ADR 35; misma forma que `viajes.Crear`). Con el pool de `op_solicitudes`, que tiene `search_path=solicitudes`: el publicador de la plataforma resuelve `outbox` por `search_path`, así que se apunta a `viajes` solo dentro de la transacción (`set_config` local) y se restaura.
+- **GRANT:** no hizo falta `SELECT` en `viajes.viaje` (el `INSERT` sin `RETURNING` ni `ON CONFLICT` no lo pide) ni `INSERT` en `viajes.transicion_viaje` (el viaje que crea Operación tampoco la escribe, DEC-148 #58). No hay migraciones nuevas. La prueba de integración lo demuestra con el rol real.
+- `Rechazar`: `PAGADO → RECHAZADO_POR_AI27`, motivo obligatorio, sin marca ni viaje; `Solicitud.motivo_rechazo` ya se llena (el cliente lo ve, #55).
+- Guardas: el jefe operativo no ve fuera de `PAGADO` (404, también en la carrera perdida); el administrador recibe `409 transicion_no_permitida`; sin fecha y hora, `409 fecha_hora_servicio_requerida`.
+- `maquina.go`: `transicionar` escribe ahora la auditoría (`auditoria.registro_auditoria`, módulo `solicitudes`) con el interceptor, en la misma transacción. `viaje_id` queda en NULL y el id de la solicitud va en `detalle`: el expediente del viaje no debe mostrar acciones comerciales de la etapa de cotización. Sin datos comerciales en el detalle.
+- `facultades.go` y `solicitudes.go`: facultad `jefe_operativo` y `administrador` y las dos rutas.
+- Pruebas: viaje, destinos, eventos y auditoría con valores a mano; guardas por estado y rol; atomicidad con falla inyectada en seis puntos (incluido el commit); carreras aprobar/aprobar, aprobar/rechazar y aprobar/cancelar; facultad por rol por HTTP.
+
 ## 2026-11-24 12:00 — `solicitudes`: el vencimiento ya no cierra una solicitud recién recotizada (E10-T7, revisión de #107)
 
 **Para quién:** quien mantiene `operacion`. Corrige un defecto: una solicitud recotizada justo cuando el worker la tomaba podía quedar `VENCIDA` con una cotización vigente recién entregada (recuperable por la vía de `VENCIDA → PAGADO`, #64).
