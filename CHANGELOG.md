@@ -1,11 +1,23 @@
 # CHANGELOG
 
+## 2026-11-25 10:00 — `solicitudes`: el jefe operativo no ve el motivo de `pago_revertido` (DEC-148 #73, revisión de #111)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Sin ola de contrato.
+
+**Cambios:**
+- **#73, histórico:** para quien no `veComercial` (el `jefe_operativo`), la entrada `pago_revertido` sale con `motivo` nulo (lo escribe el administrador y puede nombrar montos o referencias). El `motivo` de `reprogramada` se muestra. `recotizada`, `pago_confirmado` y `pago_revertido` siguen apareciendo, sin monto, notas, referencia ni objeto `cotizacion`. Cubre `Historico` y `ListarHistoricoSolicitud` (misma fachada). `cotizacion`, `administrador` y el cliente conservan lo que veían; el cliente no tiene histórico (403) y solo ve `motivo_rechazo`. Ningún otro camino del jefe reproduce ese motivo: el detalle, el listado y las respuestas de aprobar y rechazar no leen la tabla de transiciones salvo `motivo_rechazo` (solo en `RECHAZADO_POR_AI27`, escrito por el propio jefe); los avisos y los errores no incluyen motivos.
+- Aclaración: para el jefe, `cotizacion: null` y `pago: null` significan **oculto**, no "sin cotizar" (el contrato dice "null mientras no se ha cotizado"; una solicitud `PAGADO` siempre tiene ambos). Comentarios de `armar`, `Historico` y `ConsultasAPI`.
+- Pruebas: la tabla rol × campo cubre el motivo de `pago_revertido` (con un monto y una referencia) y el de `reprogramada`; el cliente ve el motivo como antes; el 404/409 de permiso y estado de `Aprobar` gana a `fecha_hora_servicio_pasada`; lista de permitidos de `veComercial`. Las pruebas del histórico ya no fallan por `nil pointer`, sino por aserción.
+- **Pendiente para la próxima ola de contrato (no se tocó el contrato):** documentar `fecha_hora_servicio_pasada` en `aprobarSolicitud` (`operacion.yaml`, `bff.yaml`), el 409 de `confirmarPago` por un segundo pago tardío (`transicion_no_permitida`) y la nota del `null` del jefe.
+
+**Archivos:** `internal/solicitudes/{historico,servicio}.go`, `operacion.go` (comentarios), `internal/solicitudes/seguimiento_test.go`, `consultas_solicitudes_integration_test.go`, `CHANGELOG.md`.
+
 ## 2026-11-24 20:00 — `solicitudes`: el jefe operativo sin lo comercial, aprobar con fecha pasada y `viaje_id` en la auditoría de `aprobada` (DEC-148 #67 a #71)
 
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Sin ola de contrato: `cotizacion` y `pago` ya son opcionales (nulos) en tracer.45.
 
 **Cambios:**
-- **#67, el jefe operativo no ve nada comercial:** para ese rol, `cotizacion` y `pago` salen `null` en el detalle, el listado, las respuestas de aprobar y rechazar y los métodos de `ConsultasAPI` (misma fachada). La consulta tampoco lee monto, moneda, notas ni `pago_solicitud` para él. En el histórico conserva todas las acciones, estados, actores y motivos, pero ningún objeto `cotizacion` (la lectura de versiones solo trae versión, entrega, vigencia y actor). `cotizacion`, `administrador` y el cliente conservan lo que ya veían. `Actor.veComercial` es una lista de permitidos.
+- **#67, el jefe operativo no ve nada comercial:** para ese rol, `cotizacion` y `pago` salen `null` en el detalle, el listado, las respuestas de aprobar y rechazar y los métodos de `ConsultasAPI` (misma fachada). La consulta tampoco lee monto, moneda, notas ni `pago_solicitud` para él. En el histórico conserva todas las acciones, estados y actores, pero ningún objeto `cotizacion` ni el `motivo` de `pago_revertido` (ver el seguimiento de abajo) (la lectura de versiones solo trae versión, entrega, vigencia y actor). `cotizacion`, `administrador` y el cliente conservan lo que ya veían. `Actor.veComercial` es una lista de permitidos.
 - **#68, aprobar con la fecha del servicio pasada:** `Aprobar` responde 409 `fecha_hora_servicio_pasada` si esa fecha no es posterior al instante actual del reloj (igual al instante actual también se rechaza, como `exigeFutura`); la solicitud no cambia. El contrato tracer.45 no documenta ese código (ver PR).
 - **#70, auditoría de `aprobada` ligada al viaje:** su fila lleva `viaje_id` (el id de la solicitud) y se escribe después de crear el viaje, dentro del interceptor y de la misma transacción (`Cambio.Tras`). Las demás acciones siguen con `viaje_id` nulo y el id en `detalle`. No hay FK en `registro_auditoria.viaje_id`; el orden lo fija una prueba con un trigger.
 - #69 y #71 solo confirman lo implementado: se quitó el `TODO(producto)` de `cotizacion_nueva` y se citan las decisiones en los comentarios.

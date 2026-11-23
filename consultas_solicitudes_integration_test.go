@@ -29,6 +29,12 @@ func TestConsultasDeSolicitudesRecorreLosDoceMetodos(t *testing.T) {
 		}
 		return auth.ContextWithClaims(ctx, c)
 	}
+	// Motivos a mano: el de la reversa nombra un monto y una referencia y el jefe no lo
+	// ve; el de la reprogramación es operativo y sí (DEC-148 #73).
+	const (
+		motivoReversa = "banco devolvio 100 MXN, ref REF-7 duplicada"
+		motivoReprog  = "el cliente movio la carga un dia"
+	)
 	futuro := time.Now().Add(72 * time.Hour)
 	hoy := openapi_types.Date{Time: time.Now().UTC().Truncate(24 * time.Hour)}
 	estado := func(s *operclient.Solicitud, err error) string {
@@ -50,10 +56,10 @@ func TestConsultasDeSolicitudesRecorreLosDoceMetodos(t *testing.T) {
 	if got := estado(api.ConfirmarPago(como("cotizacion"), id, operclient.PagoEntrada{FechaPago: hoy})); got != "PAGADO" {
 		t.Errorf("confirmar pago: %s", got)
 	}
-	if got := estado(api.ReprogramarSolicitud(como("cotizacion"), id, operclient.ReprogramacionEntrada{FechaHoraServicio: futuro.Add(24 * time.Hour), Motivo: "m"})); got != "PAGADO" {
+	if got := estado(api.ReprogramarSolicitud(como("cotizacion"), id, operclient.ReprogramacionEntrada{FechaHoraServicio: futuro.Add(24 * time.Hour), Motivo: motivoReprog})); got != "PAGADO" {
 		t.Errorf("reprogramar: %s", got)
 	}
-	if got := estado(api.RevertirPago(como("administrador"), id, operclient.MotivoEntrada{Motivo: "error"})); got != "COTIZADO" {
+	if got := estado(api.RevertirPago(como("administrador"), id, operclient.MotivoEntrada{Motivo: motivoReversa})); got != "COTIZADO" {
 		t.Errorf("revertir pago: %s", got)
 	}
 	if got := estado(api.ConfirmarPago(como("cotizacion"), id, operclient.PagoEntrada{FechaPago: hoy})); got != "PAGADO" {
@@ -98,6 +104,20 @@ func TestConsultasDeSolicitudesRecorreLosDoceMetodos(t *testing.T) {
 		for _, it := range hist.Items {
 			if it.Cotizacion != nil {
 				con++
+			}
+			var quiero *string
+			switch it.Accion {
+			case "reprogramada":
+				quiero = ptr(motivoReprog)
+			case "pago_revertido":
+				if c.comercial {
+					quiero = ptr(motivoReversa)
+				}
+			default:
+				continue
+			}
+			if (quiero == nil) != (it.Motivo == nil) || quiero != nil && *quiero != *it.Motivo {
+				t.Errorf("motivo de %s para %s = %v, quería %v", it.Accion, c.rol, it.Motivo, quiero)
 			}
 		}
 		if (con == 1) != c.comercial || (!c.comercial && con != 0) || len(hist.Items) != 6 {

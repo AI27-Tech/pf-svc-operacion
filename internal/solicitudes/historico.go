@@ -28,6 +28,9 @@ import (
 //
 // El jefe operativo recibe las acciones y transiciones sin el objeto `cotizacion`
 // (DEC-148 #67): la consulta de versiones no lee monto, moneda ni notas para él.
+// Tampoco recibe el `motivo` de `pago_revertido`, texto libre del administrador que
+// puede nombrar montos o referencias; el de `reprogramada` es operativo y sí lo
+// ve (DEC-148 #73). Para ese rol un `cotizacion` nulo significa oculto.
 func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operclient.HistoricoSolicitud, error) {
 	if a.Rol != rolCotizacion && a.Rol != rolAdministrador && a.Rol != RolJefeOperativo {
 		return nil, platformerrors.NewProhibido("operacion: el rol %q no ve el histórico de la solicitud", a.Rol)
@@ -94,6 +97,9 @@ func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operc
 		if err := rows.Scan(&n, &de, &a, &accion, &actorID, &motivo, &marca, &en); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("solicitudes: leer una transición: %w", err)
+		}
+		if !comercial && accion == "pago_revertido" { // DEC-148 #73
+			motivo = nil
 		}
 		it := operclient.HistoricoSolicitudItem{
 			Accion: accion, DeEstado: est(estados.EstadoSolicitud(de)), AEstado: est(estados.EstadoSolicitud(a)),

@@ -1191,7 +1191,9 @@ type ConsultasAPI interface {
 	// declara bff.OperacionPort; mismos casos de uso que las rutas HTTP (I3). El
 	// actor sale de los claims del ctx. Errores de dominio con el `codigo` del
 	// contrato: transicion_no_permitida, fecha_pago_fuera_de_vigencia,
-	// fecha_hora_servicio_requerida. 503 si la raíz no inyectó el pool de op_solicitudes.
+	// fecha_hora_servicio_requerida, y fecha_hora_servicio_pasada (aprobar; pendiente de
+	// documentar en el contrato). Para el jefe operativo `cotizacion` y `pago` nulos
+	// significan ocultos (DEC-148 #67), no "sin cotizar". 503 si la raíz no inyectó el pool de op_solicitudes.
 	CrearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error)
 	ListarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error)
 	ObtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error)

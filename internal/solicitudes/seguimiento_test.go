@@ -23,10 +23,18 @@ const (
 	notasV1    = "nota-primera"
 	notasV2    = "nota-secreta"
 	referencia = "REF-9"
+	// Motivos escritos a mano. El de la reversa nombra un monto y una referencia: si
+	// llega al jefe, sinComercial lo detecta. El de la reprogramación es operativo.
+	motivoReversa = "banco devolvio 2500.75 MXN, ref REF-9 duplicada"
+	motivoReprog  = "el cliente movio la carga al 12 de diciembre"
 )
 
+// fechaReprog es la fecha del servicio tras reprogramar (la cotizada fue el 10-dic).
+var fechaReprog = time.Date(2026, 12, 12, 16, 0, 0, 0, time.UTC)
+
 // pagadaComercial deja una solicitud PAGADO con dos versiones de cotización (monto,
-// notas) y un pago con referencia, y devuelve su id y el del cliente.
+// notas), un pago con referencia que se revierte y se vuelve a confirmar, y una
+// reprogramación; devuelve su id y el del cliente.
 func pagadaComercial(t *testing.T, ctx testCtx, svc *Servicio) (uuid.UUID, uuid.UUID) {
 	t.Helper()
 	cli := uuid.New()
@@ -49,6 +57,18 @@ func pagadaComercial(t *testing.T, ctx testCtx, svc *Servicio) (uuid.UUID, uuid.
 	}
 	conRelojEn(svc, time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC))
 	if _, err := svc.ConfirmarPago(ctx, aCot, s.Id, operclient.PagoEntrada{FechaPago: dia("2026-11-25"), Referencia: ptr(referencia)}); err != nil {
+		t.Fatal(err)
+	}
+	conRelojEn(svc, time.Date(2026, 11, 21, 9, 30, 0, 0, time.UTC))
+	if _, err := svc.RevertirPago(ctx, aAdmin, s.Id, operclient.MotivoEntrada{Motivo: motivoReversa}); err != nil {
+		t.Fatal(err)
+	}
+	conRelojEn(svc, time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC))
+	if _, err := svc.ConfirmarPago(ctx, aCot, s.Id, operclient.PagoEntrada{FechaPago: dia("2026-11-25"), Referencia: ptr(referencia)}); err != nil {
+		t.Fatal(err)
+	}
+	conRelojEn(svc, time.Date(2026, 11, 21, 10, 30, 0, 0, time.UTC))
+	if _, err := svc.Reprogramar(ctx, aCot, s.Id, operclient.ReprogramacionEntrada{FechaHoraServicio: fechaReprog, Motivo: motivoReprog}); err != nil {
 		t.Fatal(err)
 	}
 	return s.Id, cli
@@ -80,11 +100,12 @@ func TestVisibilidadComercialPorRol(t *testing.T) {
 		cotizacion   bool // ve la cotización vigente (v2) en detalle y listado
 		pago         bool // ve el pago en detalle y listado
 		verHistorico bool // el histórico responde (el cliente recibe 403)
+		motivoPago   bool // ve el motivo de `pago_revertido` en el histórico (DEC-148 #73)
 	}{
-		{actorCliente(cli), true, true, false},
-		{aCot, true, true, true},
-		{aAdmin, true, true, true},
-		{aJefe, false, false, true},
+		{actorCliente(cli), true, true, false, false}, // sin histórico: el motivo no le llega por ahí
+		{aCot, true, true, true, true},
+		{aAdmin, true, true, true, true},
+		{aJefe, false, false, true, false},
 	}
 	for _, c := range tabla {
 		t.Run(c.actor.Rol, func(t *testing.T) {
@@ -105,8 +126,8 @@ func TestVisibilidadComercialPorRol(t *testing.T) {
 				}
 				// Lo no comercial lo ven todos, también el jefe.
 				if s.Estado != "PAGADO" || s.Origen != "Manzanillo" || len(s.Destinos) != 1 || s.Destinos[0].Nombre != "Guadalajara" ||
-					s.FechaHoraServicio == nil || !s.FechaHoraServicio.Equal(time.Date(2026, 12, 10, 16, 0, 0, 0, time.UTC)) ||
-					s.TipoServicio == nil || *s.TipoServicio != "escolta" || s.Tracto == nil || *s.Tracto.Placas != "ABC-123" || s.MarcaPenalizacion {
+					s.FechaHoraServicio == nil || !s.FechaHoraServicio.Equal(fechaReprog) ||
+					s.TipoServicio == nil || *s.TipoServicio != "escolta" || s.Tracto == nil || *s.Tracto.Placas != "ABC-123" || s.MarcaPenalizacion || s.MotivoRechazo != nil {
 					t.Errorf("%s: la solicitud perdió campos no comerciales: %+v", donde, s)
 				}
 				if !c.cotizacion && !c.pago {
@@ -134,17 +155,31 @@ func TestVisibilidadComercialPorRol(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// El jefe ve las mismas acciones, en el mismo orden; solo cambia el objeto cotizacion.
+			// El jefe ve las mismas acciones, en el mismo orden; solo cambia el objeto cotizacion
+			// y el motivo de la reversa del pago.
 			var acciones []string
 			versiones := map[string]string{}
+			motivos := map[string]*string{}
 			for _, it := range h.Items {
 				acciones = append(acciones, it.Accion)
+				motivos[it.Accion] = it.Motivo
 				if it.Cotizacion != nil {
-					versiones[it.Accion] = it.Cotizacion.Monto + "/" + *it.Cotizacion.Notas
+					notas := "<nil>"
+					if it.Cotizacion.Notas != nil {
+						notas = *it.Cotizacion.Notas
+					}
+					versiones[it.Accion] = it.Cotizacion.Monto + "/" + notas
 				}
 			}
-			if got := strings.Join(acciones, ","); got != "creada,cotizada,recotizada,pago_confirmado" {
+			if got := strings.Join(acciones, ","); got != "creada,cotizada,recotizada,pago_confirmado,pago_revertido,pago_confirmado,reprogramada" {
 				t.Errorf("acciones del histórico = %s", got)
+			}
+			// El motivo de pago_revertido solo lo ve quien ve lo comercial; el de reprogramada, todos.
+			if m := motivos["pago_revertido"]; c.motivoPago && (m == nil || *m != motivoReversa) || !c.motivoPago && m != nil {
+				t.Errorf("motivo de pago_revertido = %v, visible esperado = %v", m, c.motivoPago)
+			}
+			if m := motivos["reprogramada"]; m == nil || *m != motivoReprog {
+				t.Errorf("motivo de reprogramada = %v, quería %q", m, motivoReprog)
 			}
 			if c.cotizacion {
 				if versiones["cotizada"] != montoV1+"/"+notasV1 || versiones["recotizada"] != montoV2+"/"+notasV2 || len(versiones) != 2 {
@@ -156,7 +191,7 @@ func TestVisibilidadComercialPorRol(t *testing.T) {
 				}
 				sinComercial(t, "histórico", h)
 				// Conserva instante, estados y actor de cada entrada.
-				if h.Items[1].AEstado == nil || *h.Items[1].AEstado != "COTIZADO" || !h.Items[2].En.Equal(time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)) ||
+				if len(h.Items) < 3 || h.Items[1].AEstado == nil || *h.Items[1].AEstado != "COTIZADO" || !h.Items[2].En.Equal(time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)) ||
 					h.Items[2].ActorId == nil || h.Items[2].ActorId.String() != subCotizacion {
 					t.Errorf("el histórico del jefe perdió datos no comerciales: %+v", h.Items)
 				}
@@ -232,10 +267,14 @@ func TestLaRespuestaDeAprobarYRechazarNoTraeLoComercial(t *testing.T) {
 	s, err := svc.Aprobar(ctx, aJefe, apr)
 	if err != nil || s.Estado != "APROBADO" || s.Cotizacion != nil || s.Pago != nil {
 		t.Errorf("aprobar: %v %+v", err, s)
+	} else {
+		sinComercial(t, "respuesta de aprobar", s)
 	}
 	s, err = svc.Rechazar(ctx, aJefe, rec, operclient.MotivoEntrada{Motivo: "sin escolta"})
 	if err != nil || s.Estado != "RECHAZADO_POR_AI27" || s.Cotizacion != nil || s.Pago != nil {
 		t.Errorf("rechazar: %v %+v", err, s)
+	} else {
+		sinComercial(t, "respuesta de rechazar", s)
 	}
 }
 
@@ -326,5 +365,100 @@ func TestAuditoriaDeAprobadaLlevaElViajeId(t *testing.T) {
 	// Las otras acciones de la solicitud aprobada (creada, cotizada, pagos, ...) siguen en su fila.
 	if n := consulta[int](t, ctx, `SELECT count(*) FROM auditoria.registro_auditoria WHERE detalle->>'solicitud_id'=$1::text AND viaje_id IS NULL`, apr); n < 5 {
 		t.Errorf("las demás acciones de la solicitud aprobada conservan su fila sin viaje_id (%d)", n)
+	}
+}
+
+// TestElClienteVeElMotivoComoAntes (DEC-148 #73): ocultar el motivo de la reversa al
+// jefe no cambia lo del cliente. No tiene histórico (403) y su solicitud solo trae
+// `motivo_rechazo`, el que escribe el jefe al rechazar; ningún motivo de la reversa ni
+// de la reprogramación aparece en su detalle o listado.
+func TestElClienteVeElMotivoComoAntes(t *testing.T) {
+	ctx, svc := prepara(t)
+	id, cli := pagadaComercial(t, ctx, svc)
+	c := actorCliente(cli)
+	sinMotivos := func(donde string, v any) {
+		raw, _ := json.Marshal(v)
+		for _, m := range []string{motivoReversa, motivoReprog} {
+			if strings.Contains(string(raw), m) {
+				t.Errorf("%s: el cliente ve un motivo interno %q: %s", donde, m, raw)
+			}
+		}
+	}
+	det, err := svc.Obtener(ctx, c, id)
+	if err != nil || det.MotivoRechazo != nil {
+		t.Fatalf("detalle antes de rechazar: %v %+v", err, det)
+	}
+	sinMotivos("detalle", det)
+	if _, err := svc.Historico(ctx, c, id); categoriaDe(err) != platformerrors.CategoryProhibido {
+		t.Errorf("histórico del cliente: esperaba 403, obtuve %v", err)
+	}
+	if _, err := svc.Rechazar(ctx, aJefe, id, operclient.MotivoEntrada{Motivo: "sin escolta"}); err != nil {
+		t.Fatal(err)
+	}
+	det, err = svc.Obtener(ctx, c, id)
+	if err != nil || det.MotivoRechazo == nil || *det.MotivoRechazo != "sin escolta" {
+		t.Fatalf("detalle tras rechazar: %v %+v", err, det)
+	}
+	sinMotivos("detalle rechazada", det)
+	pag, err := svc.Listar(ctx, c, nil, nil)
+	if err != nil || len(pag.Items) != 1 || pag.Items[0].MotivoRechazo == nil || *pag.Items[0].MotivoRechazo != "sin escolta" {
+		t.Fatalf("listado tras rechazar: %v %+v", err, pag)
+	}
+	sinMotivos("listado", pag)
+}
+
+// TestAprobarValidaVisibilidadYEstadoAntesQueLaFecha: con la fecha del servicio ya
+// pasada, quien no ve la solicitud recibe 404 y el administrador en un estado
+// incorrecto recibe 409 transicion_no_permitida; el 409 fecha_hora_servicio_pasada
+// solo lo ve quien ve la solicitud en PAGADO. Así la fecha no se infiere por el
+// tipo de error (DEC-148 #68).
+func TestAprobarValidaVisibilidadYEstadoAntesQueLaFecha(t *testing.T) {
+	ctx, svc := prepara(t)
+	conRelojEn(svc, time.Date(2026, 11, 21, 6, 0, 0, 0, time.UTC))
+	pasada := `UPDATE solicitudes.solicitud SET fecha_hora_servicio = '2020-01-01T00:00:00Z' WHERE id=$1`
+	t.Run("jefe fuera de PAGADO: 404", func(t *testing.T) {
+		id, _ := sembrar(t, ctx, "COTIZADO")
+		ejecuta(t, ctx, pasada, id)
+		if _, err := svc.Aprobar(ctx, aJefe, id); categoriaDe(err) != platformerrors.CategoryNoEncontrado {
+			t.Errorf("esperaba 404, obtuve %v", err)
+		}
+	})
+	t.Run("administrador fuera de PAGADO: transicion_no_permitida", func(t *testing.T) {
+		id, _ := sembrar(t, ctx, "COTIZADO")
+		ejecuta(t, ctx, pasada, id)
+		if _, err := svc.Aprobar(ctx, aAdmin, id); codigoDe(err) != "transicion_no_permitida" {
+			t.Errorf("esperaba 409 transicion_no_permitida, obtuve %v", err)
+		}
+	})
+	t.Run("cliente ajeno en PAGADO: 404", func(t *testing.T) {
+		id, _ := sembrar(t, ctx, "PAGADO")
+		ejecuta(t, ctx, pasada, id)
+		if _, err := svc.Aprobar(ctx, actorCliente(uuid.New()), id); categoriaDe(err) != platformerrors.CategoryNoEncontrado {
+			t.Errorf("esperaba 404, obtuve %v", err)
+		}
+	})
+	t.Run("jefe en PAGADO: sí ve el 409 de la fecha", func(t *testing.T) {
+		id, _ := sembrar(t, ctx, "PAGADO")
+		ejecuta(t, ctx, pasada, id)
+		if _, err := svc.Aprobar(ctx, aJefe, id); codigoDe(err) != "fecha_hora_servicio_pasada" {
+			t.Errorf("esperaba 409 fecha_hora_servicio_pasada, obtuve %v", err)
+		}
+	})
+}
+
+// TestVeComercialFallaCerrada: solo cliente, cotizacion y administrador ven lo
+// comercial. Un rol desconocido o vacío no lo ve. Nota: abrir `veComercial` a los
+// roles desconocidos es hoy una mutación equivalente en comportamiento: ningún otro
+// rol llega a `armar` ni a `Historico` (los frena el rol o la visibilidad antes), así
+// que solo esta prueba unitaria de la lista de permitidos la detecta.
+func TestVeComercialFallaCerrada(t *testing.T) {
+	for rol, quiero := range map[string]bool{
+		"cliente": true, "cotizacion": true, "administrador": true,
+		"jefe_operativo": false, "monitorista": false, "supervisor": false, "coordinador": false,
+		"ejecutivo": false, "reaccion": false, "": false, "rol_nuevo": false,
+	} {
+		if got := (Actor{Rol: rol}).veComercial(); got != quiero {
+			t.Errorf("veComercial(%q) = %v, quería %v", rol, got, quiero)
+		}
 	}
 }

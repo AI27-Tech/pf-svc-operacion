@@ -152,7 +152,8 @@ func (s *Servicio) enTx(ctx context.Context, id uuid.UUID, delCliente bool, a Ac
 func (s *Servicio) armar(ctx context.Context, tx pgx.Tx, f *fila, a Actor) (*operclient.Solicitud, error) {
 	cid := operclient.Id(f.ClienteID)
 	// El jefe operativo no ve nada comercial (DEC-148 #67): ni siquiera se leen la
-	// cotización ni el pago, y el contrato los deja nulos. Los avisos del jefe no
+	// cotización ni el pago, y el contrato los deja nulos. Para este rol `null` significa
+	// "oculto", no "sin cotizar": una solicitud PAGADO siempre tiene ambos. Los avisos del jefe no
 	// dependen de la cotización (no tiene ninguno).
 	var cot *operclient.Cotizacion
 	var pago *operclient.Pago
