@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 2026-11-24 12:00 — `solicitudes`: el vencimiento ya no cierra una solicitud recién recotizada (E10-T7, revisión de #107)
+
+**Para quién:** quien mantiene `operacion`. Corrige un defecto: una solicitud recotizada justo cuando el worker la tomaba podía quedar `VENCIDA` con una cotización vigente recién entregada (recuperable por la vía de `VENCIDA → PAGADO`, #64).
+
+**Cambios:**
+- `vencimiento.go`: `vencer` repite la condición (estado `COTIZADO` y vigencia de la última versión terminada) con una consulta nueva DESPUÉS de tomar el bloqueo. La sentencia que bloquea evalúa la vigencia con la instantánea de su inicio, y una recotización sin cambio de fecha no actualiza la fila de `solicitud`, así que Postgres no la reevaluaba.
+- Prueba `TestVencerNoCierraUnaSolicitudRecotizadaEnCarrera`: lanza `vencer` y `Cotizar` a la vez sobre 2400 solicitudes; sin el arreglo fallan unas 25, con él ninguna.
+
 ## 2026-11-24 09:00 — `solicitudes`: vencimiento automático de la cotización (E10-T7, DEC-148 #15, #50, #63)
 
 **Para quién:** quien mantiene `operacion` y `pf-svc-core`. Cambia comportamiento: `COTIZADO` sin pago pasa solo a `VENCIDA`. `core` debe arrancar `Workers()` (ya lo hace para el relay) para que corra.
