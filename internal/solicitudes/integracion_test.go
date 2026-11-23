@@ -39,18 +39,30 @@ func prepara(t *testing.T) (context.Context, *Servicio) {
 	dbtest.Serializar(t, ctx) // no correr a la vez que otros paquetes (misma base)
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
-	archivos, err := migrations.ArchivosDe("solicitudes")
-	if err != nil {
-		t.Fatalf("listar migraciones solicitudes: %v", err)
-	}
-	for _, f := range archivos {
+	// Todos los esquemas, en dos fases (estructura y luego grants), como el
+	// aplicador de producción: la aprobación escribe en viajes y auditoria.
+	aplica := func(f string) {
 		sql, err := migrations.FS.ReadFile(f)
 		if err != nil {
 			t.Fatalf("leer %s: %v", f, err)
 		}
 		dbtest.Exec(t, ctx, admin, string(sql))
 	}
-	dbtest.Exec(t, ctx, admin, "TRUNCATE "+tablasDelEsquema(t, ctx, admin)+" RESTART IDENTITY CASCADE")
+	for _, esquema := range migrations.Orden {
+		archivos, err := migrations.ArchivosDe(esquema)
+		if err != nil || len(archivos) == 0 {
+			t.Fatalf("migraciones de %s: %v", esquema, err)
+		}
+		aplica(archivos[0])
+	}
+	for _, esquema := range migrations.Orden {
+		archivos, _ := migrations.ArchivosDe(esquema)
+		for _, f := range archivos[1:] {
+			aplica(f)
+		}
+	}
+	dbtest.Exec(t, ctx, admin, "TRUNCATE "+tablasDelEsquema(t, ctx, admin)+
+		", viajes.viaje, viajes.destino, viajes.outbox, auditoria.registro_auditoria RESTART IDENTITY CASCADE")
 	pool, cerrarPool := dbtest.PoolAs(t, ctx, "op_solicitudes", "solicitudes")
 	t.Cleanup(cerrarPool)
 	return ctx, NewServicio(pool, outbox.NewPublisher())

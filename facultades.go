@@ -40,6 +40,10 @@ var facultades = map[string][]roles.Rol{
 	// lo revierte (DEC-148 #37).
 	"confirmarPago": {roles.RolCotizacion, roles.RolAdministrador},
 	"revertirPago":  {roles.RolAdministrador},
+	// El jefe operativo aprueba y rechaza la solicitud pagada; el administrador
+	// hereda (DEC-148 #20). Aprobar crea el viaje en la misma transacción (ADR 39).
+	"aprobarSolicitud":  {roles.RolJefeOperativo, roles.RolAdministrador},
+	"rechazarSolicitud": {roles.RolJefeOperativo, roles.RolAdministrador},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
 	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }

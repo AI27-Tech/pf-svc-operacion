@@ -147,7 +147,17 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 	if err != nil {
 		return nil, err
 	}
+	// El cliente ve el motivo del rechazo de AI27 (DEC-148 #55); nil en otro estado.
+	var motivoRechazo *string
+	if f.Estado == estados.EstadoSolicitudRechazadoPorAi27 {
+		if err := tx.QueryRow(ctx,
+			`SELECT motivo FROM solicitudes.transicion_solicitud
+			  WHERE solicitud_id = $1 AND a_estado = 'RECHAZADO_POR_AI27' ORDER BY id DESC LIMIT 1`, f.ID).Scan(&motivoRechazo); err != nil {
+			return nil, fmt.Errorf("solicitudes: leer el motivo del rechazo: %w", err)
+		}
+	}
 	return &operclient.Solicitud{
+		MotivoRechazo:     motivoRechazo,
 		Id:                f.ID,
 		Estado:            operclient.EstadoSolicitud(f.Estado),
 		ClienteId:         &cid,

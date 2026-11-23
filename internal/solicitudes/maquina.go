@@ -11,6 +11,7 @@ import (
 	eventosv1 "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/eventos/ai27/eventos/v1"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -106,6 +107,38 @@ func (s *Servicio) transicionar(ctx context.Context, tx pgx.Tx, sol *fila, c Cam
 	}
 
 	en := s.ahora().UTC()
+	// Detalle de la auditoría: ids, estados, disparador y motivo; nunca datos
+	// comerciales (monto, notas) ni el contenido de la cotización.
+	detalle := map[string]any{
+		"solicitud_id": sol.ID.String(), "de_estado": string(de), "a_estado": string(c.A),
+		"disparador": string(c.Disparador), "actor_rol": c.Actor.Rol,
+	}
+	if motivo != "" {
+		detalle["motivo"] = motivo
+	}
+	if c.A == estados.EstadoSolicitudCanceladoPorCliente {
+		detalle["marca_penalizacion"] = r.marca
+	}
+	detalleJSON, err := json.Marshal(detalle)
+	if err != nil {
+		return fmt.Errorf("solicitudes: serializar el detalle de auditoría: %w", err)
+	}
+	// La auditoría se escribe en la MISMA transacción que el cambio (P3, E10-T11):
+	// si cualquiera falla, el llamador hace rollback y no queda ninguno.
+	return auditoria.Interceptar(ctx, tx, auditoria.Registro{
+		Modulo: ModuloAuditoria, Accion: r.accion, ActorID: c.Actor.Subject, Detalle: detalleJSON,
+	}, func(ctx context.Context, tx pgx.Tx) error {
+		return s.escribirTransicion(ctx, tx, sol, c, r, motivo, en)
+	})
+}
+
+// ModuloAuditoria es el valor de `modulo` en auditoria.registro_auditoria.
+const ModuloAuditoria = "solicitudes"
+
+// escribirTransicion es el cambio de dominio de una transición: el estado, su
+// fila de histórico y su evento. Lo envuelve el interceptor de auditoría.
+func (s *Servicio) escribirTransicion(ctx context.Context, tx pgx.Tx, sol *fila, c Cambio, r regla, motivo string, en time.Time) error {
+	de := sol.Estado
 	// La marca la fija la arista (PAGADO -> CANCELADO_POR_CLIENTE), nunca el llamador.
 	// WHERE estado = de: defensa en profundidad tras el FOR UPDATE del llamador. Si
 	// otro camino cambió el estado, no se pisa: 409 en vez de una transición falsa.

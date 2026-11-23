@@ -27,6 +27,8 @@ func (m *Module) rutasSolicitudes(mux *http.ServeMux, protegido func(http.Handle
 	mux.Handle("POST /api/v1/solicitudes/{id}/cancelacion", protegido(http.HandlerFunc(m.handleCancelarSolicitud)))
 	mux.Handle("PUT /api/v1/solicitudes/{id}/pago", protegido(http.HandlerFunc(m.handleConfirmarPago)))
 	mux.Handle("POST /api/v1/solicitudes/{id}/reversa-pago", protegido(http.HandlerFunc(m.handleRevertirPago)))
+	mux.Handle("POST /api/v1/solicitudes/{id}/aprobacion", protegido(http.HandlerFunc(m.handleAprobarSolicitud)))
+	mux.Handle("POST /api/v1/solicitudes/{id}/rechazo", protegido(http.HandlerFunc(m.handleRechazarSolicitud)))
 }
 
 // actorDe arma el actor de un comando desde los claims. Sin claims es 401: una
@@ -256,4 +258,47 @@ func (m *Module) revertirPago(ctx context.Context, id operclient.Id, body opercl
 		return nil, err
 	}
 	return m.solicitudes.RevertirPago(ctx, a, id, body)
+}
+
+// handleAprobarSolicitud atiende POST /api/v1/solicitudes/{id}/aprobacion (sin cuerpo).
+func (m *Module) handleAprobarSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.aprobarSolicitud(r.Context(), id)
+	responder(w, s, err)
+}
+
+// handleRechazarSolicitud atiende POST /api/v1/solicitudes/{id}/rechazo.
+func (m *Module) handleRechazarSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.MotivoEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.rechazarSolicitud(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+func (m *Module) aprobarSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "aprobarSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Aprobar(ctx, a, id)
+}
+
+func (m *Module) rechazarSolicitud(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "rechazarSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Rechazar(ctx, a, id, body)
 }
