@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
@@ -22,6 +23,9 @@ type autenticadorRoles struct{ tenant string }
 func (a autenticadorRoles) VerifyToken(_ context.Context, token string) (*auth.Claims, error) {
 	if token == "cliente" {
 		return &auth.Claims{Subject: "cli-1", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: a.tenant}, nil
+	}
+	if token == "cliente-otro" {
+		return &auth.Claims{Subject: "cli-2", Rol: "cliente", Audiencia: auth.AudienciaCliente, TenantID: uuid.NewString()}, nil
 	}
 	return &auth.Claims{Subject: token + "-1", Rol: token, Audiencia: auth.AudienciaInterno}, nil
 }
@@ -104,5 +108,94 @@ func TestSolicitudesSinPoolNoMontaRutas(t *testing.T) {
 	m.Routes(mux)
 	if got := llamar(t, mux, http.MethodPost, "/api/v1/solicitudes", "cliente", `{}`).Code; got != http.StatusNotFound && got != http.StatusMethodNotAllowed {
 		t.Errorf("status %d, esperaba 404", got)
+	}
+}
+
+// TestCotizacionYRespuestaHTTP recorre E10-T4 y E10-T5 por las rutas del módulo:
+// la facultad por rol, el 404 entre organizaciones y el flujo feliz.
+func TestCotizacionYRespuestaHTTP(t *testing.T) {
+	ctx := context.Background()
+	tenant := uuid.New()
+	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorRoles{tenant: tenant.String()}, Atomos: catalogo})
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	// Fecha futura relativa: la regla de DEC-148 #66 usa el reloj real aquí y una fecha fija caducaría.
+	fut := time.Now().AddDate(1, 0, 0).UTC().Format(time.RFC3339)
+	cot := `{"monto":"2500.00","moneda":"MXN","fecha_hora_servicio":"` + fut + `"}`
+
+	crear := func() string {
+		rec := llamar(t, mux, http.MethodPost, "/api/v1/solicitudes", "cliente", `{"origen":"CDMX","destinos":[{"nombre":"GDL"}]}`)
+		var s operclient.Solicitud
+		if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &s) != nil {
+			t.Fatalf("crear: %d %s", rec.Code, rec.Body)
+		}
+		return s.Id.String()
+	}
+	estado := func(rec *httptest.ResponseRecorder) string {
+		var s operclient.Solicitud
+		if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+			t.Fatalf("respuesta: %v (%s)", err, rec.Body)
+		}
+		return string(s.Estado)
+	}
+
+	id := crear()
+	ruta := "/api/v1/solicitudes/" + id
+	// Facultad por rol: solo cotizacion y administrador cotizan y reprograman.
+	for _, rol := range []string{"cliente", "jefe_operativo", "monitorista", "supervisor", "coordinador", "ejecutivo", "reaccion"} {
+		if got := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", rol, cot).Code; got != http.StatusForbidden {
+			t.Errorf("cotizar como %s: %d, quería 403", rol, got)
+		}
+		if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", rol, `{"fecha_hora_servicio":"`+fut+`","motivo":"x"}`).Code; got != http.StatusForbidden {
+			t.Errorf("reprogramar como %s: %d, quería 403", rol, got)
+		}
+	}
+	// Solo el cliente rechaza y cancela.
+	for _, rol := range []string{"cotizacion", "administrador", "jefe_operativo", "monitorista", "supervisor", "coordinador", "ejecutivo", "reaccion"} {
+		for _, accion := range []string{"/rechazo-cotizacion", "/cancelacion"} {
+			if got := llamar(t, mux, http.MethodPost, ruta+accion, rol, "").Code; got != http.StatusForbidden {
+				t.Errorf("%s como %s: %d, quería 403", accion, rol, got)
+			}
+		}
+	}
+	if got := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", "", cot).Code; got != http.StatusUnauthorized {
+		t.Errorf("sin token: %d", got)
+	}
+	if got := llamar(t, mux, http.MethodPut, "/api/v1/solicitudes/no-es-uuid/cotizacion", "cotizacion", cot).Code; got != http.StatusBadRequest {
+		t.Errorf("id inválido: %d", got)
+	}
+	if got := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", "cotizacion", `{"monto":"1","moneda":"MXN"}`).Code; got != http.StatusBadRequest {
+		t.Errorf("cotizar sin fecha: %d, quería 400", got)
+	}
+
+	if rec := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", "cotizacion", cot); rec.Code != http.StatusOK || estado(rec) != "COTIZADO" {
+		t.Fatalf("cotizar: %d %s", rec.Code, rec.Body)
+	}
+	// El administrador hereda la facultad: recotiza.
+	if rec := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", "administrador", cot); rec.Code != http.StatusOK || estado(rec) != "COTIZADO" {
+		t.Fatalf("recotizar como administrador: %d %s", rec.Code, rec.Body)
+	}
+	// Reprogramar en COTIZADO: 409.
+	if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", "cotizacion", `{"fecha_hora_servicio":"`+fut+`","motivo":"x"}`).Code; got != http.StatusConflict {
+		t.Errorf("reprogramar en COTIZADO: %d, quería 409", got)
+	}
+	// Otra organización: 404, no 403.
+	if got := llamar(t, mux, http.MethodPost, ruta+"/cancelacion", "cliente-otro", "").Code; got != http.StatusNotFound {
+		t.Errorf("cancelar una solicitud ajena: %d, quería 404", got)
+	}
+	// El cuerpo opcional puede venir vacío o con motivo; un campo ajeno es 400.
+	if got := llamar(t, mux, http.MethodPost, ruta+"/rechazo-cotizacion", "cliente", `{"otro":1}`).Code; got != http.StatusBadRequest {
+		t.Errorf("cuerpo con campo ajeno: %d, quería 400", got)
+	}
+	if rec := llamar(t, mux, http.MethodPost, ruta+"/rechazo-cotizacion", "cliente", ""); rec.Code != http.StatusOK || estado(rec) != "RECHAZADO_POR_CLIENTE" {
+		t.Fatalf("rechazar la cotización: %d %s", rec.Code, rec.Body)
+	}
+	if got := llamar(t, mux, http.MethodPost, ruta+"/cancelacion", "cliente", "").Code; got != http.StatusConflict {
+		t.Errorf("cancelar tras rechazar: %d, quería 409", got)
+	}
+
+	id2 := crear()
+	if rec := llamar(t, mux, http.MethodPost, "/api/v1/solicitudes/"+id2+"/cancelacion", "cliente", `{"motivo":"ya no"}`); rec.Code != http.StatusOK || estado(rec) != "CANCELADO_POR_CLIENTE" {
+		t.Fatalf("cancelar: %d %s", rec.Code, rec.Body)
 	}
 }

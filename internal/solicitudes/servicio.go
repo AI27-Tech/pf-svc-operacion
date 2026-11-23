@@ -102,10 +102,47 @@ func cargarDeCliente(ctx context.Context, tx pgx.Tx, id uuid.UUID, a Actor) (*fi
 	return f, nil
 }
 
+// enTx es el esqueleto de un comando sobre una solicitud existente: abre la
+// transacción, carga la solicitud bloqueada (de la organización del actor si es
+// un comando del cliente, 404 si es ajena), corre fn y devuelve la solicitud ya
+// actualizada. Si fn falla, rollback: no queda ningún cambio, histórico ni evento.
+func (s *Servicio) enTx(ctx context.Context, id uuid.UUID, delCliente bool, a Actor, fn func(pgx.Tx, *fila) error) (*operclient.Solicitud, error) {
+	tx, err := s.tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var f *fila
+	if delCliente {
+		f, err = cargarDeCliente(ctx, tx, id, a)
+	} else {
+		f, err = cargar(ctx, tx, id, true)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := fn(tx, f); err != nil {
+		return nil, err
+	}
+	out, err := armar(ctx, tx, f)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("solicitudes: commit: %w", err)
+	}
+	return out, nil
+}
+
 // armar convierte la fila en la Solicitud del contrato.
 // shortcut: avisos va vacío; se derivan del estado y la hora en E10-T10.
 func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, error) {
 	cid := operclient.Id(f.ClienteID)
+	cot, err := cotizacionVigente(ctx, tx, f.ID)
+	if err != nil {
+		return nil, err
+	}
 	return &operclient.Solicitud{
 		Id:                f.ID,
 		Estado:            operclient.EstadoSolicitud(f.Estado),
@@ -115,6 +152,7 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 		FechaHoraServicio: f.FechaHoraServicio,
 		TipoServicio:      f.TipoServicio,
 		Tracto:            f.Tracto,
+		Cotizacion:        cot,
 		MarcaPenalizacion: f.Marca,
 		Avisos:            []string{},
 		CreadoEn:          f.CreadoEn,

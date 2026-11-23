@@ -1,13 +1,17 @@
 package operacion
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/solicitudes"
+	"github.com/google/uuid"
 )
 
 // rutasSolicitudes monta las rutas del módulo `solicitudes` (OpenAPI de
@@ -17,6 +21,10 @@ func (m *Module) rutasSolicitudes(mux *http.ServeMux, protegido func(http.Handle
 		return
 	}
 	mux.Handle("POST /api/v1/solicitudes", protegido(http.HandlerFunc(m.handleCrearSolicitud)))
+	mux.Handle("PUT /api/v1/solicitudes/{id}/cotizacion", protegido(http.HandlerFunc(m.handleCotizarSolicitud)))
+	mux.Handle("PUT /api/v1/solicitudes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleReprogramarSolicitud)))
+	mux.Handle("POST /api/v1/solicitudes/{id}/rechazo-cotizacion", protegido(http.HandlerFunc(m.handleRechazarCotizacion)))
+	mux.Handle("POST /api/v1/solicitudes/{id}/cancelacion", protegido(http.HandlerFunc(m.handleCancelarSolicitud)))
 }
 
 // actorDe arma el actor de un comando desde los claims. Sin claims es 401: una
@@ -50,12 +58,152 @@ func (m *Module) handleCrearSolicitud(w http.ResponseWriter, r *http.Request) {
 // crearSolicitud aplica la facultad (solo el cliente) y delega en el módulo. Lo
 // comparten HTTP y la fachada en proceso (I3).
 func (m *Module) crearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error) {
-	if err := exigirFacultad(ctx, "crearSolicitud"); err != nil {
-		return nil, err
-	}
-	a, err := actorDe(ctx, "crearSolicitud")
+	a, err := actorConFacultad(ctx, "crearSolicitud")
 	if err != nil {
 		return nil, err
 	}
 	return m.solicitudes.Crear(ctx, a, body)
+}
+
+// idSolicitud lee el {id} de la ruta; un id mal formado es 400.
+func idSolicitud(r *http.Request) (uuid.UUID, error) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		return uuid.Nil, platformerrors.NewValidacion("operacion: id de solicitud inválido")
+	}
+	return id, nil
+}
+
+// responder escribe la solicitud resultante (200) o el error de la plataforma.
+func responder(w http.ResponseWriter, s *operclient.Solicitud, err error) {
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, s)
+}
+
+// decodificarOpcional lee un cuerpo que el contrato deja opcional: en blanco es
+// válido (entrada vacía); si trae algo, es estricto.
+func decodificarOpcional(r *http.Request, v any) error {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err)
+	}
+	return nil
+}
+
+// handleCotizarSolicitud atiende PUT /api/v1/solicitudes/{id}/cotizacion.
+func (m *Module) handleCotizarSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.CotizacionEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.cotizarSolicitud(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+// handleReprogramarSolicitud atiende PUT /api/v1/solicitudes/{id}/fecha-hora.
+func (m *Module) handleReprogramarSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.ReprogramacionEntrada
+	if err := decodificarEstricto(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.reprogramarSolicitud(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+// handleRechazarCotizacion atiende POST /api/v1/solicitudes/{id}/rechazo-cotizacion.
+func (m *Module) handleRechazarCotizacion(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.AccionClienteEntrada
+	if err := decodificarOpcional(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.rechazarCotizacion(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+// handleCancelarSolicitud atiende POST /api/v1/solicitudes/{id}/cancelacion.
+func (m *Module) handleCancelarSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	var body operclient.AccionClienteEntrada
+	if err := decodificarOpcional(r, &body); err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.cancelarSolicitud(r.Context(), id, body)
+	responder(w, s, err)
+}
+
+// Las fachadas aplican la facultad del comando y delegan en el módulo; las
+// comparten HTTP y la fachada en proceso (I3).
+
+func (m *Module) cotizarSolicitud(ctx context.Context, id operclient.Id, body operclient.CotizacionEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "cotizarSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Cotizar(ctx, a, id, body)
+}
+
+func (m *Module) reprogramarSolicitud(ctx context.Context, id operclient.Id, body operclient.ReprogramacionEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "reprogramarSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Reprogramar(ctx, a, id, body)
+}
+
+func (m *Module) rechazarCotizacion(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "rechazarCotizacion")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.RechazarCotizacion(ctx, a, id, body)
+}
+
+func (m *Module) cancelarSolicitud(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "cancelarSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Cancelar(ctx, a, id, body)
+}
+
+// actorConFacultad exige la facultad del comando y arma el actor.
+func actorConFacultad(ctx context.Context, op string) (solicitudes.Actor, error) {
+	if err := exigirFacultad(ctx, op); err != nil {
+		return solicitudes.Actor{}, err
+	}
+	return actorDe(ctx, op)
 }

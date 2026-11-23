@@ -30,6 +30,12 @@ var facultades = map[string][]roles.Rol{
 	// E10 (ADR 38, DEC-148): el cliente crea la solicitud. El resto de las acciones
 	// de la solicitud se agregan con su historia; el alcance fino por rol es E10-T9.
 	"crearSolicitud": {roles.RolCliente},
+	// cotizacion cotiza, recotiza y reprograma; el administrador hereda sus
+	// facultades (DEC-148 #20). El cliente rechaza la cotización y cancela.
+	"cotizarSolicitud":     {roles.RolCotizacion, roles.RolAdministrador},
+	"reprogramarSolicitud": {roles.RolCotizacion, roles.RolAdministrador},
+	"rechazarCotizacion":   {roles.RolCliente},
+	"cancelarSolicitud":    {roles.RolCliente},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
 	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }

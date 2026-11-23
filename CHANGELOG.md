@@ -1,10 +1,39 @@
 # CHANGELOG
 
+## 2026-11-23 18:00 — `solicitudes`: moneda única MXN y fecha del servicio futura al cotizar y reprogramar (DEC-148 #62, #66)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: cotizar con otra moneda o con fecha pasada responde `400`; reprogramar a una fecha pasada responde `400`.
+
+**Cambios:**
+- `cotizacion.go`: la única moneda es `MXN`, exacta (`USD`, `mxn` o ` MXN ` se rechazan; ya no se recorta). El monto admite cero y rechaza negativos. `Cotizar` y `Reprogramar` exigen una fecha del servicio posterior al reloj (`exigeFutura`, #103). Se quita el `TODO(producto)` de moneda y monto.
+- Pruebas: `cotizacion_test.go` (monedas, monto cero y negativo, fecha pasada, igual a ahora y un segundo después, también en `Reprogramar`) y `solicitudes_integration_test.go` (la fecha HTTP es relativa a hoy para no caducar).
+- **Contrato:** `CotizacionEntrada.moneda` es `string` libre en tracer.45; la validación vive en `operacion`. Pasarla a enum es una ola aditiva de contrato que el Lead debe decidir (la descripción del contrato advierte que estrechar a enum es incompatible); no se hizo aquí.
+
 ## 2026-11-23 17:30 — `solicitudes`: la fecha del servicio al crear debe ser futura (DEC-148 #66)
 
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: `Crear` con `fecha_hora_servicio` en el pasado responde `400`.
 
 **Cambios:** `exigeFutura` (`servicio.go`) rechaza una fecha igual o anterior al reloj del servicio; `Crear` la aplica cuando el cliente envía fecha (es opcional). Se compara el instante, que da lo mismo medido en `America/Mexico_City` que en UTC. `TestCrear` usa un reloj fijo y cubre ayer, igual a ahora, un segundo antes, hora en CDMX y un segundo después (se acepta).
+
+## 2026-11-23 11:15 — `solicitudes`: prueba de la fecha del servicio al cotizar (revisión de #104)
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento.
+
+**Cambios:** `TestCotizarPersisteFechaDelServicio` lee de la base `solicitud.fecha_hora_servicio` tras cotizar y recotizar; falla si `Cotizar` deja de actualizarla (E10-T8 la lee para la guarda de DEC-010 #2 y para el viaje).
+
+## 2026-11-23 10:37 — solicitudes: cotizar, recotizar, reprogramar, rechazar la cotización y cancelar (E10-T4, E10-T5)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel/portal. Agrega cuatro rutas del OpenAPI de tracer.45: `PUT /api/v1/solicitudes/{id}/cotizacion`, `PUT .../fecha-hora`, `POST .../rechazo-cotizacion` y `POST .../cancelacion`. Se apila sobre E10-T2/T3 (PR #103).
+
+**Resumen:** `cotizacion` y `administrador` cotizan (`SOLICITADO → COTIZADO`), recotizan (versión nueva, sin cambio de estado, vigencia desde la última entrega) y reprograman una solicitud `PAGADO` con motivo obligatorio. El cliente dueño rechaza la cotización (`COTIZADO → RECHAZADO_POR_CLIENTE`) o cancela (`CANCELADO_POR_CLIENTE`, con marca de penalización solo desde `PAGADO`); una solicitud de otra organización responde 404. La vigencia (15 días, `America/Mexico_City`) se calcula al entregar la cotización para guardar `vigente_hasta`; el vencimiento automático no entra (E10-T7).
+
+**Cambios:**
+- `migrations/solicitudes/0004_cotizacion.sql` (nuevo): `cotizacion` (una fila por versión, solo `INSERT`) y `reprogramacion_solicitud` (solo `INSERT`).
+- `internal/solicitudes/cotizacion.go`, `respuesta.go` (nuevos), `servicio.go`: `Cotizar`, `Reprogramar`, `RechazarCotizacion`, `Cancelar` y la cotización vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades por rol.
+- Pruebas: `internal/solicitudes/cotizacion_test.go`, `respuesta_test.go`; `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)` en el código):** catálogo de monedas y límites del monto; cómputo exacto del último día de vigencia.
 
 ## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
 
