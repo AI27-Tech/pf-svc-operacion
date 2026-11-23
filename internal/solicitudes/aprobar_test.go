@@ -2,7 +2,9 @@ package solicitudes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +12,9 @@ import (
 	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/estados"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 var (
@@ -446,5 +450,90 @@ func TestAprobarConcurrente(t *testing.T) {
 				t.Errorf("gano=%q estado=%s viajes=%d marca=%v", gano, estado, viajes, marca)
 			}
 		})
+	}
+}
+
+// TestAprobarPublicaLaFormaDeViajesCrear fija CLAVE POR CLAVE los dos eventos viaje.*
+// de una aprobación. Los valores están escritos a mano y son los que emite
+// viajes.Crear (internal/viajes/servicio.go): reportes lee viaje_id, cliente_id,
+// estado y creado_en de viaje.creado, y mensajeria lee viaje_id y cliente_id de
+// viaje.mensajeria_habilitada. Quitar o renombrar una clave, o subir Version,
+// rompe a esos consumidores sin ningún error visible.
+func TestAprobarPublicaLaFormaDeViajesCrear(t *testing.T) {
+	ctx, svc := prepara(t)
+	cli := uuid.New()
+	id := pagadaCon(t, ctx, svc, cli, operclient.CrearSolicitudEntrada{Origen: "Puerto de Manzanillo", Destinos: []operclient.Destino{{Nombre: "Guadalajara"}}})
+	svc.ConReloj(func() time.Time { return time.Date(2026, 11, 26, 15, 0, 0, 0, time.UTC) })
+	if _, err := svc.Aprobar(ctx, actorJefe, id); err != nil {
+		t.Fatal(err)
+	}
+	casos := map[string]map[string]any{
+		"viaje.creado": {
+			"viaje_id": id.String(), "estado": "APROBADO", "cliente_id": cli.String(),
+			"origen": "Puerto de Manzanillo", "creado_en": "2026-11-26T15:00:00Z",
+		},
+		"viaje.mensajeria_habilitada": {
+			"viaje_id": id.String(), "cliente_id": cli.String(), "creado_en": "2026-11-26T15:00:00Z",
+		},
+	}
+	c, cerrar := adminConn(t, ctx)
+	defer cerrar()
+	for tipo, want := range casos {
+		var version int
+		var agregado string
+		var ocurrido time.Time
+		var crudo []byte
+		if err := c.QueryRow(ctx, `SELECT version, agregado_id, ocurrido_en, payload FROM viajes.outbox WHERE tipo=$1 AND agregado_id=$2`,
+			tipo, id.String()).Scan(&version, &agregado, &ocurrido, &crudo); err != nil {
+			t.Fatalf("%s no está en viajes.outbox: %v", tipo, err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(crudo, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: payload = %v, quería exactamente %v", tipo, got, want)
+		}
+		if version != 1 || agregado != id.String() || !ocurrido.Equal(time.Date(2026, 11, 26, 15, 0, 0, 0, time.UTC)) {
+			t.Errorf("%s: version=%d agregado=%s ocurrido_en=%s", tipo, version, agregado, ocurrido)
+		}
+	}
+}
+
+// TestPublicarEnViajesRestauraElSearchPath: el search_path apunta a viajes SOLO
+// mientras se publican los viaje.*. Un evento publicado después, en la misma
+// transacción, debe ir al outbox de solicitudes y no al de viajes (cuyo relay lo
+// publicaría sin error).
+func TestPublicarEnViajesRestauraElSearchPath(t *testing.T) {
+	ctx, svc := prepara(t)
+	id, _ := pagada(t, ctx, svc)
+	var antes, despues string
+	err := correr(ctx, svc, func(tx pgx.Tx) error {
+		f, err := cargar(ctx, tx, id, true)
+		if err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT current_setting('search_path')`).Scan(&antes); err != nil {
+			return err
+		}
+		if err := svc.crearViaje(ctx, tx, f); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT current_setting('search_path')`).Scan(&despues); err != nil {
+			return err
+		}
+		return svc.pub.Publish(ctx, tx, outbox.Event{Tipo: "solicitud.prueba_search_path", Version: 1, AgregadoID: id.String(), OcurridoEn: time.Now().UTC(), Payload: map[string]any{}})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if antes != despues {
+		t.Errorf("search_path = %q tras crearViaje, era %q", despues, antes)
+	}
+	if n := consulta[int](t, ctx, `SELECT count(*) FROM viajes.outbox WHERE tipo='solicitud.prueba_search_path'`); n != 0 {
+		t.Errorf("un evento solicitud.* aterrizó en viajes.outbox (%d)", n)
+	}
+	if n := consulta[int](t, ctx, `SELECT count(*) FROM solicitudes.outbox WHERE tipo='solicitud.prueba_search_path'`); n != 1 {
+		t.Errorf("el evento debía ir a solicitudes.outbox (%d)", n)
 	}
 }
