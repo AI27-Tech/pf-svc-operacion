@@ -30,6 +30,7 @@ func TestTablaRolPorAccionDeSolicitudes(t *testing.T) {
 		{"crear", "POST", "/api/v1/solicitudes", `{"origen":"A","destinos":[{"nombre":"B"}]}`, []string{"cliente"}},
 		{"listar", "GET", "/api/v1/solicitudes", ``, []string{"cliente", "cotizacion", "jefe_operativo", "administrador"}},
 		{"obtener", "GET", "/api/v1/solicitudes/" + id, ``, []string{"cliente", "cotizacion", "jefe_operativo", "administrador"}},
+		{"histórico", "GET", "/api/v1/solicitudes/" + id + "/historico", ``, []string{"cotizacion", "jefe_operativo", "administrador"}},
 		{"cotizar y recotizar", "PUT", "/api/v1/solicitudes/" + id + "/cotizacion", cot, []string{"cotizacion", "administrador"}},
 		{"reprogramar", "PUT", "/api/v1/solicitudes/" + id + "/fecha-hora", repro, []string{"cotizacion", "administrador"}},
 		{"confirmar pago", "PUT", "/api/v1/solicitudes/" + id + "/pago", `{"fecha_pago":"2099-01-01"}`, []string{"cotizacion", "administrador"}},

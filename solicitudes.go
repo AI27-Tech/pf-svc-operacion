@@ -23,6 +23,7 @@ func (m *Module) rutasSolicitudes(mux *http.ServeMux, protegido func(http.Handle
 	mux.Handle("POST /api/v1/solicitudes", protegido(http.HandlerFunc(m.handleCrearSolicitud)))
 	mux.Handle("GET /api/v1/solicitudes", protegido(http.HandlerFunc(m.handleListarSolicitudes)))
 	mux.Handle("GET /api/v1/solicitudes/{id}", protegido(http.HandlerFunc(m.handleObtenerSolicitud)))
+	mux.Handle("GET /api/v1/solicitudes/{id}/historico", protegido(http.HandlerFunc(m.handleListarHistoricoSolicitud)))
 	mux.Handle("PUT /api/v1/solicitudes/{id}/cotizacion", protegido(http.HandlerFunc(m.handleCotizarSolicitud)))
 	mux.Handle("PUT /api/v1/solicitudes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleReprogramarSolicitud)))
 	mux.Handle("POST /api/v1/solicitudes/{id}/rechazo-cotizacion", protegido(http.HandlerFunc(m.handleRechazarCotizacion)))
@@ -348,4 +349,37 @@ func (m *Module) obtenerSolicitud(ctx context.Context, id operclient.Id) (*operc
 		return nil, err
 	}
 	return m.solicitudes.Obtener(ctx, a, id)
+}
+
+// handleListarHistoricoSolicitud atiende GET /api/v1/solicitudes/{id}/historico.
+func (m *Module) handleListarHistoricoSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	h, err := m.listarHistoricoSolicitud(r.Context(), id)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, h)
+}
+
+func (m *Module) listarHistoricoSolicitud(ctx context.Context, id operclient.Id) (*operclient.HistoricoSolicitud, error) {
+	a, err := actorConFacultad(ctx, "listarHistoricoSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Historico(ctx, a, id)
+}
+
+// solicitudesHabilitadas es 503 si la raíz no inyectó el pool de op_solicitudes:
+// las rutas no se montan, y la fachada en proceso responde igual que ellas no
+// responderían, sin dereferenciar un módulo ausente.
+func (m *Module) solicitudesHabilitadas() error {
+	if m.solicitudes == nil {
+		return platformerrors.NewDegradado("operacion: el módulo de solicitudes no está habilitado (falta el pool de op_solicitudes)")
+	}
+	return nil
 }

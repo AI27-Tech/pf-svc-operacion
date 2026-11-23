@@ -1187,6 +1187,23 @@ type ConsultasAPI interface {
 	// `"tracto": null` a &Tracto{} antes de llamar.
 	ObtenerFicha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error)
 	GuardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error)
+	// Solicitudes (V2, ADR 38 y 39, DEC-148): los mismos 12 métodos y firmas que
+	// declara bff.OperacionPort; mismos casos de uso que las rutas HTTP (I3). El
+	// actor sale de los claims del ctx. Errores de dominio con el `codigo` del
+	// contrato: transicion_no_permitida, fecha_pago_fuera_de_vigencia,
+	// fecha_hora_servicio_requerida. 503 si la raíz no inyectó el pool de op_solicitudes.
+	CrearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error)
+	ListarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error)
+	ObtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error)
+	ListarHistoricoSolicitud(ctx context.Context, id operclient.Id) (*operclient.HistoricoSolicitud, error)
+	CotizarSolicitud(ctx context.Context, id operclient.Id, body operclient.CotizacionEntrada) (*operclient.Solicitud, error)
+	ReprogramarSolicitud(ctx context.Context, id operclient.Id, body operclient.ReprogramacionEntrada) (*operclient.Solicitud, error)
+	RechazarCotizacion(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error)
+	CancelarSolicitud(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error)
+	ConfirmarPago(ctx context.Context, id operclient.Id, body operclient.PagoEntrada) (*operclient.Solicitud, error)
+	RevertirPago(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error)
+	AprobarSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error)
+	RechazarSolicitud(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error)
 }
 
 type consultas struct {
@@ -1481,4 +1498,91 @@ func (c *consultas) GuardarFicha(ctx context.Context, id operclient.Id, body ope
 		return nil, err
 	}
 	return c.m.guardarFicha(ctx, id, body)
+}
+
+// Fachada en proceso de las solicitudes: cada método comprueba que el módulo esté
+// habilitado y delega en la misma fachada que usa la ruta HTTP (I3).
+
+func (c *consultas) CrearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.crearSolicitud(ctx, body)
+}
+
+func (c *consultas) ListarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.listarSolicitudes(ctx, params)
+}
+
+func (c *consultas) ObtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.obtenerSolicitud(ctx, id)
+}
+
+func (c *consultas) ListarHistoricoSolicitud(ctx context.Context, id operclient.Id) (*operclient.HistoricoSolicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.listarHistoricoSolicitud(ctx, id)
+}
+
+func (c *consultas) CotizarSolicitud(ctx context.Context, id operclient.Id, body operclient.CotizacionEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.cotizarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) ReprogramarSolicitud(ctx context.Context, id operclient.Id, body operclient.ReprogramacionEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.reprogramarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) RechazarCotizacion(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.rechazarCotizacion(ctx, id, body)
+}
+
+func (c *consultas) CancelarSolicitud(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.cancelarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) ConfirmarPago(ctx context.Context, id operclient.Id, body operclient.PagoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.confirmarPago(ctx, id, body)
+}
+
+func (c *consultas) RevertirPago(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.revertirPago(ctx, id, body)
+}
+
+func (c *consultas) AprobarSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.aprobarSolicitud(ctx, id)
+}
+
+func (c *consultas) RechazarSolicitud(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.rechazarSolicitud(ctx, id, body)
 }

@@ -2,6 +2,7 @@ package solicitudes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -219,19 +221,29 @@ func (s *Servicio) Crear(ctx context.Context, a Actor, in operclient.CrearSolici
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // no-op tras commit
 
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO solicitudes.solicitud
-		   (id, cliente_id, estado, marca_penalizacion, origen, destinos, fecha_hora_servicio, tipo_servicio, tracto, creado_en)
-		 VALUES ($1,$2,$3,false,$4,$5,$6,$7,$8,$9)`,
-		id, clienteID, string(estados.EstadoSolicitudSolicitado), in.Origen, in.Destinos, fecha, in.TipoServicio, in.Tracto, en,
-	); err != nil {
-		return nil, fmt.Errorf("solicitudes: insertar solicitud: %w", err)
+	// La creación se audita en la misma transacción (E10-T11). El detalle lleva ids,
+	// nunca datos comerciales.
+	detalle, err := json.Marshal(map[string]any{"solicitud_id": id.String(), "a_estado": string(estados.EstadoSolicitudSolicitado), "actor_rol": a.Rol})
+	if err != nil {
+		return nil, err
 	}
-	if err := s.publicar(ctx, tx, TipoSolicitudCreada, id, en, &eventosv1.SolicitudCreada{
-		SolicitudId: id.String(),
-		ClienteId:   clienteID.String(),
-		CreadaEn:    timestamppb.New(en),
-	}); err != nil {
+	err = auditoria.Interceptar(ctx, tx, auditoria.Registro{Modulo: ModuloAuditoria, Accion: "creada", ActorID: a.Subject, Detalle: detalle},
+		func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO solicitudes.solicitud
+				   (id, cliente_id, estado, marca_penalizacion, origen, destinos, fecha_hora_servicio, tipo_servicio, tracto, creado_en, creado_por)
+				 VALUES ($1,$2,$3,false,$4,$5,$6,$7,$8,$9,$10)`,
+				id, clienteID, string(estados.EstadoSolicitudSolicitado), in.Origen, in.Destinos, fecha, in.TipoServicio, in.Tracto, en, nullsiVacio(a.Subject),
+			); err != nil {
+				return fmt.Errorf("solicitudes: insertar solicitud: %w", err)
+			}
+			return s.publicar(ctx, tx, TipoSolicitudCreada, id, en, &eventosv1.SolicitudCreada{
+				SolicitudId: id.String(),
+				ClienteId:   clienteID.String(),
+				CreadaEn:    timestamppb.New(en),
+			})
+		})
+	if err != nil {
 		return nil, err
 	}
 	f, err := cargar(ctx, tx, id, false)

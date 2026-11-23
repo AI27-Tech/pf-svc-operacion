@@ -2,6 +2,7 @@ package solicitudes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/estados"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/auditoria"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	openapi_types "github.com/oapi-codegen/runtime/types"
@@ -78,28 +80,71 @@ func (s *Servicio) Cotizar(ctx context.Context, a Actor, id uuid.UUID, in opercl
 		}
 		en := s.ahora().UTC()
 		fecha := in.FechaHoraServicio.UTC()
-		if f.Estado == estados.EstadoSolicitudSolicitado {
+		recotiza := f.Estado == estados.EstadoSolicitudCotizado
+		if !recotiza {
+			// La primera cotización es la transición SOLICITADO -> COTIZADO: la audita
+			// transicionar como `cotizada`.
 			if err := s.transicionar(ctx, tx, f, Cambio{A: estados.EstadoSolicitudCotizado, Disparador: DisparadorCotizacion, Actor: a}); err != nil {
 				return err
 			}
 		}
 		// Versión nueva: max+1 bajo el bloqueo de la solicitud, sin carreras.
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO solicitudes.cotizacion
-			   (solicitud_id, version, monto, moneda, fecha_hora_servicio, notas, entregada_en, vigente_hasta, actor_id, actor_rol)
-			 SELECT $1, COALESCE(max(version), 0) + 1, $2::numeric, $3, $4, $5, $6, $7, $8, $9
-			   FROM solicitudes.cotizacion WHERE solicitud_id = $1`,
-			id, in.Monto, in.Moneda, fecha, in.Notas, en, vigenteHasta(en), nullsiVacio(a.Subject), nullsiVacio(a.Rol),
-		); err != nil {
-			return fmt.Errorf("solicitudes: insertar cotización: %w", err)
+		var version int
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(max(version), 0) + 1 FROM solicitudes.cotizacion WHERE solicitud_id = $1`, id).Scan(&version); err != nil {
+			return fmt.Errorf("solicitudes: calcular la versión de la cotización: %w", err)
 		}
-		// La fecha vigente del servicio es la de la última cotización (contrato).
-		if _, err := tx.Exec(ctx, `UPDATE solicitudes.solicitud SET fecha_hora_servicio = $2 WHERE id = $1`, id, fecha); err != nil {
-			return fmt.Errorf("solicitudes: fijar la fecha del servicio: %w", err)
+		insertar := func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO solicitudes.cotizacion
+				   (solicitud_id, version, monto, moneda, fecha_hora_servicio, notas, entregada_en, vigente_hasta, actor_id, actor_rol)
+				 VALUES ($1, $2, $3::numeric, $4, $5, $6, $7, $8, $9, $10)`,
+				id, version, in.Monto, in.Moneda, fecha, in.Notas, en, vigenteHasta(en), nullsiVacio(a.Subject), nullsiVacio(a.Rol),
+			); err != nil {
+				return fmt.Errorf("solicitudes: insertar cotización: %w", err)
+			}
+			return nil
+		}
+		if recotiza {
+			// Recotizar no cambia el estado: se audita como acción propia (E10-T11).
+			// El detalle no lleva monto ni notas.
+			if err := s.auditado(ctx, tx, "recotizada", a, map[string]any{"solicitud_id": id.String(), "version": version}, insertar); err != nil {
+				return err
+			}
+		} else if err := insertar(ctx, tx); err != nil {
+			return err
+		}
+		// La fecha vigente del servicio es la de la última cotización (contrato). Si
+		// cambia respecto de la anterior (la del cliente o la de la versión previa), el
+		// cambio queda auditado con la fecha anterior y la nueva.
+		anterior := f.FechaHoraServicio
+		if anterior == nil || !anterior.Equal(fecha) {
+			detalle := map[string]any{"solicitud_id": id.String(), "fecha_hora_nueva": fecha.Format(time.RFC3339)}
+			if anterior != nil {
+				detalle["fecha_hora_anterior"] = anterior.UTC().Format(time.RFC3339)
+			}
+			if err := s.auditado(ctx, tx, "fecha_cambiada_en_cotizacion", a, detalle, func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, `UPDATE solicitudes.solicitud SET fecha_hora_servicio = $2 WHERE id = $1`, id, fecha); err != nil {
+					return fmt.Errorf("solicitudes: fijar la fecha del servicio: %w", err)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
 		}
 		f.FechaHoraServicio = &fecha
 		return nil
 	})
+}
+
+// auditado ejecuta `cambio` y escribe, en la MISMA transacción, el registro de
+// auditoría de una acción que no es transición de estado (recotizar, reprogramar,
+// cambio de fecha al cotizar). Las transiciones las audita transicionar.
+func (s *Servicio) auditado(ctx context.Context, tx pgx.Tx, accion string, a Actor, detalle map[string]any, cambio func(context.Context, pgx.Tx) error) error {
+	d, err := json.Marshal(detalle)
+	if err != nil {
+		return fmt.Errorf("solicitudes: serializar el detalle de auditoría: %w", err)
+	}
+	return auditoria.Interceptar(ctx, tx, auditoria.Registro{Modulo: ModuloAuditoria, Accion: accion, ActorID: a.Subject, Detalle: d}, cambio)
 }
 
 // Reprogramar cambia la fecha y hora de una solicitud PAGADO. Motivo obligatorio;
@@ -123,16 +168,25 @@ func (s *Servicio) Reprogramar(ctx context.Context, a Actor, id uuid.UUID, in op
 				"operacion: solo se reprograma una solicitud pagada, no una en %s", f.Estado)
 		}
 		fecha := in.FechaHoraServicio.UTC()
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO solicitudes.reprogramacion_solicitud
-			   (solicitud_id, fecha_hora_anterior, fecha_hora_nueva, motivo, actor_id, actor_rol, creado_en)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			id, f.FechaHoraServicio, fecha, motivo, nullsiVacio(a.Subject), nullsiVacio(a.Rol), s.ahora().UTC(),
-		); err != nil {
-			return fmt.Errorf("solicitudes: registrar reprogramación: %w", err)
+		detalle := map[string]any{"solicitud_id": id.String(), "motivo": motivo, "fecha_hora_nueva": fecha.Format(time.RFC3339)}
+		if f.FechaHoraServicio != nil {
+			detalle["fecha_hora_anterior"] = f.FechaHoraServicio.UTC().Format(time.RFC3339)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE solicitudes.solicitud SET fecha_hora_servicio = $2 WHERE id = $1`, id, fecha); err != nil {
-			return fmt.Errorf("solicitudes: reprogramar: %w", err)
+		if err := s.auditado(ctx, tx, "reprogramada", a, detalle, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO solicitudes.reprogramacion_solicitud
+				   (solicitud_id, fecha_hora_anterior, fecha_hora_nueva, motivo, actor_id, actor_rol, creado_en)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+				id, f.FechaHoraServicio, fecha, motivo, nullsiVacio(a.Subject), nullsiVacio(a.Rol), s.ahora().UTC(),
+			); err != nil {
+				return fmt.Errorf("solicitudes: registrar reprogramación: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `UPDATE solicitudes.solicitud SET fecha_hora_servicio = $2 WHERE id = $1`, id, fecha); err != nil {
+				return fmt.Errorf("solicitudes: reprogramar: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		f.FechaHoraServicio = &fecha
 		return nil
