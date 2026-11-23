@@ -20,9 +20,10 @@ import (
 // `pago_confirmado_tardio`. La fecha del pago es obligatoria y debe caer dentro de
 // la vigencia de la ÚLTIMA cotización, desde su día de entrega hasta su último día,
 // ambos incluidos (DEC-148 #34, #43): gana la fecha del pago, no la de la
-// confirmación. No genera aviso al cliente (DEC-148 #56).
-// TODO(producto): si VENCIDA -> PAGADO puede repetirse en la misma solicitud no
-// está decidido (ADR 38); hoy no se restringe.
+// confirmación; puede ser futura mientras caiga en la vigencia (DEC-148 #65).
+// VENCIDA -> PAGADO ocurre una sola vez por solicitud (DEC-148 #64): si el
+// histórico ya la registra, otro pago tardío responde 409 transicion_no_permitida
+// (el contrato no define un código propio). No genera aviso al cliente (DEC-148 #56).
 func (s *Servicio) ConfirmarPago(ctx context.Context, a Actor, id uuid.UUID, in operclient.PagoEntrada) (*operclient.Solicitud, error) {
 	if in.FechaPago.IsZero() {
 		return nil, platformerrors.NewValidacion("operacion: fecha_pago es obligatoria")
@@ -31,6 +32,22 @@ func (s *Servicio) ConfirmarPago(ctx context.Context, a Actor, id uuid.UUID, in 
 		if !estados.PuedeTransicionarSolicitud(f.Estado, estados.EstadoSolicitudPagado) {
 			return platformerrors.NewConflictoCodigo("transicion_no_permitida",
 				"operacion: no se puede confirmar el pago de una solicitud en %s", f.Estado)
+		}
+		// El histórico (append-only, escrito solo por transicionar) es la fuente de la
+		// regla, no pago_solicitud: no depende de que quede la fila del pago y sobrevive
+		// a la reversa. La fila de la solicitud está bloqueada FOR UPDATE por enTx, así
+		// que dos pagos tardíos simultáneos se serializan y el segundo ve el primero.
+		if f.Estado == estados.EstadoSolicitudVencida {
+			var yaHubo bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM solicitudes.transicion_solicitud
+				                 WHERE solicitud_id = $1 AND de_estado = 'VENCIDA' AND a_estado = 'PAGADO')`, id).Scan(&yaHubo); err != nil {
+				return fmt.Errorf("solicitudes: leer el histórico del pago tardío: %w", err)
+			}
+			if yaHubo {
+				return platformerrors.NewConflictoCodigo("transicion_no_permitida",
+					"operacion: el pago tardío (VENCIDA a PAGADO) solo ocurre una vez por solicitud")
+			}
 		}
 		var version int
 		var entrega, vigHasta time.Time

@@ -241,3 +241,63 @@ func TestPagoSeValidaContraLaUltimaCotizacion(t *testing.T) {
 		t.Errorf("el pago apunta a la versión %d, quería 2", v)
 	}
 }
+
+// TestPagoTardioUnaSolaVez (DEC-148 #64): VENCIDA -> PAGADO ocurre una vez por
+// solicitud. Tras pagar tarde, revertir y volver a VENCIDA, un segundo pago tardío
+// se rechaza con 409 transicion_no_permitida y no deja rastro. La regla es solo de
+// esa arista: un pago normal revertido antes no la consume.
+func TestPagoTardioUnaSolaVez(t *testing.T) {
+	ctx, svc := prepara(t)
+	vencer := func(id uuid.UUID) {
+		ejecuta(t, ctx, `UPDATE solicitudes.solicitud SET estado='VENCIDA' WHERE id=$1`, id) // siembra del vencimiento (E10-T7 aún no existe)
+	}
+	pago := operclient.PagoEntrada{FechaPago: dia("2026-12-01")}
+
+	t.Run("el segundo pago tardío se rechaza sin dejar rastro", func(t *testing.T) {
+		id := cotizada(t, ctx, svc)
+		vencer(id)
+		if _, err := svc.ConfirmarPago(ctx, actorCotizacion, id, pago); err != nil {
+			t.Fatalf("primer pago tardío: %v", err)
+		}
+		if _, err := svc.RevertirPago(ctx, actorAdmin, id, operclient.MotivoEntrada{Motivo: "error"}); err != nil {
+			t.Fatal(err)
+		}
+		vencer(id)
+		trans, pagos, eventos := cuenta(t, ctx, "transicion_solicitud", id), cuenta(t, ctx, "pago_solicitud", id), cuenta(t, ctx, "outbox", id)
+		_, err := svc.ConfirmarPago(ctx, actorCotizacion, id, pago)
+		if codigoDe(err) != "transicion_no_permitida" || categoriaDe(err) != platformerrors.CategoryConflicto {
+			t.Fatalf("segundo pago tardío: esperaba 409 transicion_no_permitida, obtuve %v", err)
+		}
+		if estadoDe(t, ctx, id) != "VENCIDA" || cuenta(t, ctx, "transicion_solicitud", id) != trans ||
+			cuenta(t, ctx, "pago_solicitud", id) != pagos || cuenta(t, ctx, "outbox", id) != eventos {
+			t.Errorf("el rechazo dejó cambios")
+		}
+	})
+	t.Run("un pago normal revertido no consume el pago tardío", func(t *testing.T) {
+		id := cotizada(t, ctx, svc)
+		if _, err := svc.ConfirmarPago(ctx, actorCotizacion, id, pago); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.RevertirPago(ctx, actorAdmin, id, operclient.MotivoEntrada{Motivo: "error"}); err != nil {
+			t.Fatal(err)
+		}
+		vencer(id)
+		if s, err := svc.ConfirmarPago(ctx, actorCotizacion, id, pago); err != nil || s.Estado != operclient.EstadoSolicitud("PAGADO") {
+			t.Errorf("el primer pago tardío debe aceptarse: %v", err)
+		}
+	})
+}
+
+// TestFechaDePagoFutura (DEC-148 #65): la fecha del pago puede ser posterior a hoy
+// mientras caiga en la vigencia. El reloj está en el 21-nov; el pago, el 1-dic.
+func TestFechaDePagoFutura(t *testing.T) {
+	ctx, svc := prepara(t)
+	id := cotizada(t, ctx, svc)
+	if !dia("2026-12-01").After(time.Date(2026, 11, 21, 5, 30, 0, 0, time.UTC)) {
+		t.Fatal("la fecha de la prueba debe ser futura respecto del reloj")
+	}
+	s, err := svc.ConfirmarPago(ctx, actorCotizacion, id, operclient.PagoEntrada{FechaPago: dia("2026-12-01")})
+	if err != nil || s.Estado != operclient.EstadoSolicitud("PAGADO") || s.Pago == nil || s.Pago.FechaPago.Format(time.DateOnly) != "2026-12-01" {
+		t.Fatalf("pago con fecha futura: %v / %+v", err, s)
+	}
+}

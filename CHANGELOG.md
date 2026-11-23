@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-23 18:30 — `solicitudes`: el pago tardío ocurre una sola vez y la fecha de pago puede ser futura (DEC-148 #64, #65)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Cambia comportamiento: un segundo `VENCIDA → PAGADO` en la misma solicitud responde `409 transicion_no_permitida`.
+
+**Cambios:**
+- `pago.go`: `ConfirmarPago` consulta el histórico (`transicion_solicitud`, de `VENCIDA` a `PAGADO`) dentro de la transacción y bajo el `FOR UPDATE` de la solicitud. Se lee el histórico y no `pago_solicitud` porque es append-only, lo escribe solo `transicionar` y conserva la arista aunque el pago se revierta. El contrato (tracer.45) solo define `transicion_no_permitida` y `fecha_pago_fuera_de_vigencia` para este 409; se usó el primero. Se quita el `TODO(producto)` de la repetición; el de la reversa con vigencia terminada (#63) sigue.
+- La fecha del pago futura se acepta mientras caiga en la vigencia (#65); el código ya lo permitía, ahora lo fija una prueba.
+- Pruebas (`pago_test.go`): `TestPagoTardioUnaSolaVez` (segundo pago rechazado sin rastro; un pago normal revertido no consume el tardío) y `TestFechaDePagoFutura`.
+
 ## 2026-11-23 18:00 — `solicitudes`: moneda única MXN y fecha del servicio futura al cotizar y reprogramar (DEC-148 #62, #66)
 
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: cotizar con otra moneda o con fecha pasada responde `400`; reprogramar a una fecha pasada responde `400`.
