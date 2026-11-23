@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento: cierra los hallazgos de pruebas y comentarios del informe `semantic-review/2026-11-21-pr-103-105-operacion-solicitudes.md`.
+
+**Cambios:**
+- `TestCarreraCancelarVsPagarSerializa`: 40 carreras cancelar vs pagar sobre la misma solicitud; falla si `cargar` pierde `FOR UPDATE` (verificado con la mutación).
+- `TestMetadatosDeAristasADR38`: disparador, acción, guarda de motivo y marca de las 11 aristas con valores escritos a mano desde el ADR 38 y el OpenAPI, independientes de `aristas`.
+- `TestRelayDeSolicitudesEntregaAlBus`: `solicitud.creada` llega al bus por `outbox-relay:solicitudes` con el pool `op_solicitudes`.
+- Comentarios: ya no dicen que el outbox de `viajes` es el único de `operacion` (`operacion.go`, `internal/asignacion/doc.go`); el comentario DEC-060 #2 de `facultades.go` vuelve a `guardarFicha`.
+
 ## 2026-11-23 10:34 — módulo `solicitudes`: máquina de estados y crear la solicitud (E10-T2, E10-T3; ADR 38, DEC-148)
 
 **Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Agrega la ruta `POST /api/v1/solicitudes` (solo el cliente) y el pool opcional `Pools.Solicitudes`; sin ese pool no se monta nada y el resto del servicio no cambia. `core` debe pasar el pool de `op_solicitudes` con `search_path=solicitudes` (no se toca `pf-svc-core` aquí).
