@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-11-24 18:00 — `solicitudes`: auditoría de cada acción, histórico unificado y los 12 métodos de `ConsultasAPI` (E10-T11, DEC-148 #42)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Ruta nueva `GET /api/v1/solicitudes/{id}/historico`; `ConsultasAPI` gana 12 métodos (firmas de `COSTURAS.md` §2); migración `solicitudes/0007_creado_por.sql`.
+
+**Cambios:**
+- **Auditoría** (`auditoria.registro_auditoria`, módulo `solicitudes`, misma transacción que la acción, con el interceptor): `creada`, `recotizada`, `reprogramada` y `fecha_cambiada_en_cotizacion` (cuando la cotización cambia la fecha del cliente o de la versión anterior, con fecha anterior y nueva) se suman a las transiciones, que ya audita `transicionar`. Si la auditoría falla, la acción revierte entera. Sin datos comerciales en el detalle. `viaje_id` queda NULL.
+- `0007_creado_por.sql`: `solicitud.creado_por` (el `sub` de quien creó) para que el histórico tenga el actor de `creada`; `op_solicitudes` no lee `auditoria`. Sin `GRANT` nuevo: la columna no es actualizable. La `0006` es de #106.
+- `historico.go`: `Historico` une la solicitud, `transicion_solicitud`, las versiones de la cotización y las reprogramaciones en orden cronológico (empates: creada, transición, recotizada, reprogramada). La primera cotización va en `cotizada`; las siguientes, en `recotizada`, con la versión completa. Solo `cotizacion`, `administrador` y el jefe operativo en `PAGADO`; el cliente y los demás, 403; solicitud inexistente o que el jefe ya no ve, 404. Se conserva tras aprobarse. Un `sub` que no sea UUID sale como `actor_id` null (el contrato lo tipa como `Id`).
+- `operacion.go`, `solicitudes.go`, `facultades.go`: los 12 métodos de `ConsultasAPI` (`CrearSolicitud`, `ListarSolicitudes`, `ObtenerSolicitud`, `ListarHistoricoSolicitud`, `CotizarSolicitud`, `ReprogramarSolicitud`, `RechazarCotizacion`, `CancelarSolicitud`, `ConfirmarPago`, `RevertirPago`, `AprobarSolicitud`, `RechazarSolicitud`) sobre la misma fachada que las rutas (I3); 503 si falta el pool de `op_solicitudes`.
+- Pruebas: una fila de auditoría por acción en orden y con actor; falla de auditoría revierte cada acción (siete); inmutabilidad por permisos (histórico, cotizaciones, reprogramaciones, auditoría y viajes); histórico completo y su consistencia con la auditoría; el ciclo completo por los 12 métodos de la fachada.
+
 ## 2026-11-24 15:00 — `solicitudes`: permisos por rol, listado, detalle y avisos (E10-T9, E10-T10, DEC-148 #20, #22, #53 a #57)
 
 **Para quién:** quien mantiene `operacion`, `bff` y los frontends. Rutas nuevas `GET /api/v1/solicitudes` y `GET /api/v1/solicitudes/{id}`.
