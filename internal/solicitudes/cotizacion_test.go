@@ -120,6 +120,14 @@ func TestCotizar(t *testing.T) {
 			"monto neg":   func(c *operclient.CotizacionEntrada) { c.Monto = "-10" },
 			"sin moneda":  func(c *operclient.CotizacionEntrada) { c.Moneda = "  " },
 			"sin fecha":   func(c *operclient.CotizacionEntrada) { c.FechaHoraServicio = time.Time{} },
+			// DEC-148 #62: solo MXN, exacta.
+			"moneda USD":        func(c *operclient.CotizacionEntrada) { c.Moneda = "USD" },
+			"moneda minúscula":  func(c *operclient.CotizacionEntrada) { c.Moneda = "mxn" },
+			"moneda con borde":  func(c *operclient.CotizacionEntrada) { c.Moneda = " MXN " },
+			"monto neg decimal": func(c *operclient.CotizacionEntrada) { c.Monto = "-0.01" },
+			// DEC-148 #66: el servicio debe ser posterior a ahora (el reloj es `entrega`).
+			"fecha pasada":  func(c *operclient.CotizacionEntrada) { c.FechaHoraServicio = entrega.Add(-24 * time.Hour) },
+			"fecha = ahora": func(c *operclient.CotizacionEntrada) { c.FechaHoraServicio = entrega },
 		}
 		for nombre, mod := range mal {
 			c := cotizacionBase()
@@ -130,6 +138,28 @@ func TestCotizar(t *testing.T) {
 		}
 		if estadoDe(t, ctx, id) != "SOLICITADO" || cuenta(t, ctx, "cotizacion", id) != 0 || cuenta(t, ctx, "transicion_solicitud", id) != 0 {
 			t.Errorf("la solicitud cambió tras entradas inválidas")
+		}
+	})
+
+	// DEC-148 #62: el monto cero no es error (clientes con contrato prepagado).
+	t.Run("monto cero se acepta en MXN", func(t *testing.T) {
+		for _, monto := range []string{"0", "0.00"} {
+			id, _ := nueva(t)
+			c := cotizacionBase()
+			c.Monto = monto
+			s, err := svc.Cotizar(ctx, actorCotizacion, id, c)
+			if err != nil || s.Estado != operclient.EstadoSolicitud("COTIZADO") || s.Cotizacion == nil || s.Cotizacion.Moneda != "MXN" {
+				t.Errorf("monto %s: %v / %+v", monto, err, s)
+			}
+		}
+	})
+	// DEC-148 #66: una fecha un segundo después de ahora (20-nov 23:30 en CDMX) se acepta.
+	t.Run("fecha un segundo después de ahora se acepta", func(t *testing.T) {
+		id, _ := nueva(t)
+		c := cotizacionBase()
+		c.FechaHoraServicio = entrega.Add(time.Second)
+		if _, err := svc.Cotizar(ctx, actorCotizacion, id, c); err != nil {
+			t.Errorf("esperaba aceptar: %v", err)
 		}
 	})
 
@@ -158,6 +188,8 @@ func TestCotizar(t *testing.T) {
 
 func TestReprogramar(t *testing.T) {
 	ctx, svc := prepara(t)
+	ahora := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	svc.ConReloj(func() time.Time { return ahora })
 	actor := Actor{Subject: "adm-1", Rol: "administrador"}
 	nueva := time.Date(2026, 12, 20, 9, 0, 0, 0, time.UTC)
 
@@ -200,6 +232,21 @@ func TestReprogramar(t *testing.T) {
 			t.Errorf("se registró una reprogramación inválida")
 		}
 	})
+	// DEC-148 #66: la fecha nueva debe ser posterior a ahora.
+	t.Run("fecha en el pasado o igual a ahora: 400 y nada cambia", func(t *testing.T) {
+		id, _ := sembrar(t, ctx, estados.EstadoSolicitudPagado)
+		for nombre, f := range map[string]time.Time{"ayer": ahora.Add(-24 * time.Hour), "igual a ahora": ahora} {
+			if _, err := svc.Reprogramar(ctx, actor, id, operclient.ReprogramacionEntrada{FechaHoraServicio: f, Motivo: "x"}); categoriaDe(err) != platformerrors.CategoryValidacion {
+				t.Errorf("%s: esperaba 400, obtuve %v", nombre, err)
+			}
+		}
+		if cuenta(t, ctx, "reprogramacion_solicitud", id) != 0 {
+			t.Errorf("se registró una reprogramación al pasado")
+		}
+		if _, err := svc.Reprogramar(ctx, actor, id, operclient.ReprogramacionEntrada{FechaHoraServicio: ahora.Add(time.Second), Motivo: "x"}); err != nil {
+			t.Errorf("un segundo después de ahora debe aceptarse: %v", err)
+		}
+	})
 	t.Run("fuera de PAGADO", func(t *testing.T) {
 		for _, e := range []estados.EstadoSolicitud{
 			estados.EstadoSolicitudSolicitado, estados.EstadoSolicitudCotizado, estados.EstadoSolicitudVencida, estados.EstadoSolicitudAprobado,
@@ -221,6 +268,7 @@ func TestReprogramar(t *testing.T) {
 // la usa para la guarda de DEC-010 #2 y para el viaje. Una recotización la cambia.
 func TestCotizarPersisteFechaDelServicio(t *testing.T) {
 	ctx, svc := prepara(t)
+	svc.ConReloj(func() time.Time { return time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC) })
 	id, _ := sembrar(t, ctx, estados.EstadoSolicitudSolicitado) // sin fecha del cliente
 	enBase := func() time.Time {
 		p := consulta[*time.Time](t, ctx, `SELECT fecha_hora_servicio FROM solicitudes.solicitud WHERE id=$1`, id)

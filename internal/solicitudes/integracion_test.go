@@ -364,17 +364,51 @@ func TestCrear(t *testing.T) {
 			t.Errorf("eventos = %d, quería 1", n)
 		}
 	})
+	// Reloj fijo propio: la regla de DEC-148 #66 compara contra "ahora" y las
+	// fechas de las pruebas no deben caducar con el calendario.
+	ahora := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	conReloj := func() *Servicio { c := *svc; return c.ConReloj(func() time.Time { return ahora }) }
 	t.Run("con fecha, se guarda tal cual", func(t *testing.T) {
 		in := base()
 		f := time.Date(2026, 12, 1, 15, 30, 0, 0, time.UTC)
 		in.FechaHoraServicio, in.TipoServicio = &f, ptr("escolta")
 		in.Tracto = &operclient.Tracto{Placas: ptr("ABC-123")}
-		s, err := svc.Crear(ctx, a, in)
+		s, err := conReloj().Crear(ctx, a, in)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if s.FechaHoraServicio == nil || !s.FechaHoraServicio.Equal(f) || *s.TipoServicio != "escolta" || *s.Tracto.Placas != "ABC-123" {
 			t.Errorf("solicitud = %+v", s)
+		}
+	})
+	// DEC-148 #66: la fecha del servicio debe ser posterior a ahora (en CDMX, que
+	// al comparar instantes equivale a UTC). Igual a ahora también se rechaza.
+	t.Run("fecha en el pasado o igual a ahora: 400 y nada se crea", func(t *testing.T) {
+		cdmx, _ := time.LoadLocation("America/Mexico_City")
+		for nombre, f := range map[string]time.Time{
+			"ayer":                 ahora.Add(-24 * time.Hour),
+			"igual a ahora":        ahora,
+			"un segundo antes":     ahora.Add(-time.Second),
+			"antes, en hora CDMX":  ahora.Add(-time.Minute).In(cdmx),
+			"mismo día, ya pasada": time.Date(2026, 11, 23, 11, 0, 0, 0, time.UTC),
+		} {
+			antes := consulta[int](t, ctx, `SELECT count(*) FROM solicitudes.solicitud`)
+			in := base()
+			in.FechaHoraServicio = &f
+			if _, err := conReloj().Crear(ctx, a, in); categoriaDe(err) != platformerrors.CategoryValidacion {
+				t.Errorf("%s: esperaba validación, obtuve %v", nombre, err)
+			}
+			if n := consulta[int](t, ctx, `SELECT count(*) FROM solicitudes.solicitud`); n != antes {
+				t.Errorf("%s: se creó una solicitud pese al rechazo", nombre)
+			}
+		}
+	})
+	t.Run("fecha un instante después de ahora: se acepta", func(t *testing.T) {
+		in := base()
+		f := ahora.Add(time.Second)
+		in.FechaHoraServicio = &f
+		if _, err := conReloj().Crear(ctx, a, in); err != nil {
+			t.Fatal(err)
 		}
 	})
 	rechazos := map[string]struct {
