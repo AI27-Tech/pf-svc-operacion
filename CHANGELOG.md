@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 2026-11-23 19:00 — `solicitudes`: la base solo admite moneda MXN en la cotización (DEC-148 #62)
+
+**Para quién:** quien mantiene `operacion` y quien aplica migraciones. No cambia el comportamiento del servicio, que ya validaba `MXN`. Una fila con otra moneda hará fallar la migración (no debería existir).
+
+**Cambios:**
+- `migrations/solicitudes/0006_cotizacion_moneda_mxn.sql`: `CHECK (moneda = 'MXN')` en `solicitudes.cotizacion` (constraint `cotizacion_moneda_mxn`), aditiva e idempotente. Es la única tabla con moneda. Sin cambios de GRANT. `0004` no se edita: su comentario de "moneda texto libre / catálogo pendiente" quedó superado y la nota está en `0006`.
+- `internal/solicitudes/integracion_test.go`: `TestCotizacionMonedaSoloMXN` (`USD`, `mxn` y ` MXN ` fallan por el CHECK; `MXN` pasa).
+- Se cierra el pendiente "catálogo de monedas" de la entrada del 2026-11-23 de `E10-T4`: no habrá catálogo.
+
 ## 2026-11-23 18:30 — `solicitudes`: el pago tardío ocurre una sola vez y la fecha de pago puede ser futura (DEC-148 #64, #65)
 
 **Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Cambia comportamiento: un segundo `VENCIDA → PAGADO` en la misma solicitud responde `409 transicion_no_permitida`.

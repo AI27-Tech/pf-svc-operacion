@@ -330,6 +330,29 @@ func TestPrivilegiosDeOpSolicitudes(t *testing.T) {
 	}
 }
 
+// TestCotizacionMonedaSoloMXN: la base rechaza otra moneda aunque el INSERT no
+// pase por el módulo (DEC-148 #62, segunda barrera; migración 0006).
+func TestCotizacionMonedaSoloMXN(t *testing.T) {
+	ctx, _ := prepara(t)
+	id, _ := sembrar(t, ctx, estados.EstadoSolicitudSolicitado)
+	admin, cerrar := adminConn(t, ctx)
+	defer cerrar()
+	ins := func(v int, moneda string) error {
+		_, err := admin.Exec(ctx, `INSERT INTO solicitudes.cotizacion
+			(solicitud_id, version, monto, moneda, fecha_hora_servicio, entregada_en, vigente_hasta)
+			VALUES ($1, $2, 10, $3, now(), now(), current_date)`, id, v, moneda)
+		return err
+	}
+	for i, m := range []string{"USD", "mxn", " MXN "} {
+		if err := ins(i+1, m); err == nil || !strings.Contains(err.Error(), "cotizacion_moneda_mxn") {
+			t.Errorf("moneda %q debía fallar por el CHECK: %v", m, err)
+		}
+	}
+	if err := ins(1, "MXN"); err != nil {
+		t.Errorf("MXN debía pasar: %v", err)
+	}
+}
+
 // TestCrear cubre E1-HU-001 / E10-T3.
 func TestCrear(t *testing.T) {
 	ctx, svc := prepara(t)
