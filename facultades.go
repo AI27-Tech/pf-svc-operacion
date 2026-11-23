@@ -28,7 +28,10 @@ var facultades = map[string][]roles.Rol{
 	// aprobar (E1-T3, guarda fecha_hora_servicio_definida).
 	"completarFechaHora": {roles.RolJefeOperativo, roles.RolAdministrador},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
-	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
+	// E10 (ADR 38, DEC-148): el cliente crea la solicitud. El resto de las acciones
+	// de la solicitud se agregan con su historia; el alcance fino por rol es E10-T9.
+	"crearSolicitud": {roles.RolCliente},
+	"guardarFicha":   {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }
 
 // exigirFacultad rechaza sin claims (401) y con un rol fuera de facultades[op] (403).

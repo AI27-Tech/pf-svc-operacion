@@ -46,6 +46,7 @@ import (
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/descargas"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/roster"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/solicitudes"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -59,6 +60,10 @@ type Pools struct {
 	Bitacora   *pgxpool.Pool // rol op_bitacora
 	Auditoria  *pgxpool.Pool // rol op_auditoria
 	Roster     *pgxpool.Pool // rol op_roster (roster de unidades, ADR 33)
+	// Solicitudes es el pool del rol op_solicitudes (módulo `solicitudes`, ADR 38 y
+	// 39), con search_path=solicitudes para que el publicador resuelva su outbox.
+	// Opcional: sin él no se monta ninguna ruta de solicitudes.
+	Solicitudes *pgxpool.Pool
 }
 
 // Deps agrupa los puertos de salida ya resueltos por la raíz.
@@ -120,6 +125,12 @@ type Module struct {
 	adjuntos   *adjuntos.Servicio
 	descargas  *descargas.Servicio
 	roster     *roster.Servicio
+	// solicitudes son los casos de uso de la solicitud (E10). nil sin
+	// Pools.Solicitudes.
+	solicitudes *solicitudes.Servicio
+	// relaySolicitudes drena solicitudes.outbox (solicitud.*). nil sin pool o sin
+	// Deps.BusPublisher.
+	relaySolicitudes worker.Worker
 	// auditoriaConsulta lee la bitácora probatoria para la composición del
 	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
 	auditoriaConsulta *auditoria.ServicioConsulta
@@ -192,6 +203,14 @@ func New(p Pools, d Deps) (*Module, error) {
 	// Corre con search_path=viajes, igual que el Publisher que ya lo escribe.
 	if d.BusPublisher != nil {
 		m.relay = outbox.NewRelay("outbox-relay:viajes", p.Viajes, d.BusPublisher, outbox.RelayOpciones{})
+	}
+	// Módulo solicitudes: su propio outbox y su propio relay, con su pool (rol
+	// op_solicitudes); ningún worker cruza esquemas (operacion.md (g)).
+	if p.Solicitudes != nil {
+		m.solicitudes = solicitudes.NewServicio(p.Solicitudes, pub)
+		if d.BusPublisher != nil {
+			m.relaySolicitudes = outbox.NewRelay("outbox-relay:solicitudes", p.Solicitudes, d.BusPublisher, outbox.RelayOpciones{})
+		}
 	}
 	// Proyección de tombstones y su consumidor (ADR 26 §3): solo con Broadcaster.
 	// operacion es dueño de su proyección para que el middleware (Routes) y el
@@ -351,6 +370,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarIncidencias)))
 	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleObtenerFicha)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleGuardarFicha)))
+	m.rutasSolicitudes(mux, protegido)
 }
 
 // handleObtenerFicha atiende GET /api/v1/viajes/{id}/ficha.
@@ -1055,6 +1075,9 @@ func (m *Module) Workers() []worker.Worker {
 	var ws []worker.Worker
 	if m.relay != nil {
 		ws = append(ws, m.relay)
+	}
+	if m.relaySolicitudes != nil {
+		ws = append(ws, m.relaySolicitudes)
 	}
 	if m.consumidor != nil {
 		ws = append(ws, m.consumidor)
