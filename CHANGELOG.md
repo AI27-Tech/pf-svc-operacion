@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 2026-11-23 17:30 — `solicitudes`: la fecha del servicio al crear debe ser futura (DEC-148 #66)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: `Crear` con `fecha_hora_servicio` en el pasado responde `400`.
+
+**Cambios:** `exigeFutura` (`servicio.go`) rechaza una fecha igual o anterior al reloj del servicio; `Crear` la aplica cuando el cliente envía fecha (es opcional). Se compara el instante, que da lo mismo medido en `America/Mexico_City` que en UTC. `TestCrear` usa un reloj fijo y cubre ayer, igual a ahora, un segundo antes, hora en CDMX y un segundo después (se acepta).
+
 ## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
 
 **Para quién:** quien mantiene `operacion`. No cambia comportamiento: cierra los hallazgos de pruebas y comentarios del informe `semantic-review/2026-11-21-pr-103-105-operacion-solicitudes.md`.
