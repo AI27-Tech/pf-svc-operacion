@@ -78,6 +78,10 @@ type Cambio struct {
 	Disparador Disparador
 	Actor      Actor
 	Motivo     string
+	// Tras, si existe, corre dentro de la misma transacción y del interceptor de
+	// auditoría, después del cambio de estado y antes de la fila de auditoría. Solo lo
+	// usa Aprobar, para crear el viaje antes de auditar la aprobación.
+	Tras func(context.Context, pgx.Tx) error
 }
 
 // transicionar es la ÚNICA función que cambia `solicitud.estado` (E10-T2). La
@@ -125,10 +129,20 @@ func (s *Servicio) transicionar(ctx context.Context, tx pgx.Tx, sol *fila, c Cam
 	}
 	// La auditoría se escribe en la MISMA transacción que el cambio (P3, E10-T11):
 	// si cualquiera falla, el llamador hace rollback y no queda ninguno.
-	return auditoria.Interceptar(ctx, tx, auditoria.Registro{
-		Modulo: ModuloAuditoria, Accion: r.accion, ActorID: c.Actor.Subject, Detalle: detalleJSON,
-	}, func(ctx context.Context, tx pgx.Tx) error {
-		return s.escribirTransicion(ctx, tx, sol, c, r, motivo, en)
+	reg := auditoria.Registro{Modulo: ModuloAuditoria, Accion: r.accion, ActorID: c.Actor.Subject, Detalle: detalleJSON}
+	if c.A == estados.EstadoSolicitudAprobado {
+		// La aprobación se liga al viaje, que tiene el mismo id (DEC-148 #70); las demás
+		// acciones de la solicitud llevan solo su id en el detalle.
+		reg.ViajeID = sol.ID.String()
+	}
+	return auditoria.Interceptar(ctx, tx, reg, func(ctx context.Context, tx pgx.Tx) error {
+		if err := s.escribirTransicion(ctx, tx, sol, c, r, motivo, en); err != nil {
+			return err
+		}
+		if c.Tras != nil {
+			return c.Tras(ctx, tx)
+		}
+		return nil
 	})
 }
 

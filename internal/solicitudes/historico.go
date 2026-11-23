@@ -24,7 +24,13 @@ import (
 // Solo cotizacion, administrador y el jefe operativo (mientras la solicitud está en
 // PAGADO; fuera de ahí le responde 404). El cliente y cualquier otro rol, 403: lo
 // decide el rol antes de tocar la base. El actor del contrato es un Id (UUID); un
-// `sub` que no lo sea se omite (null) en lugar de inventarse.
+// `sub` que no lo sea se omite (null) en lugar de inventarse (DEC-148 #71).
+//
+// El jefe operativo recibe las acciones y transiciones sin el objeto `cotizacion`
+// (DEC-148 #67): la consulta de versiones no lee monto, moneda ni notas para él.
+// Tampoco recibe el `motivo` de `pago_revertido`, texto libre del administrador que
+// puede nombrar montos o referencias; el de `reprogramada` es operativo y sí lo
+// ve (DEC-148 #73). Para ese rol un `cotizacion` nulo significa oculto.
 func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operclient.HistoricoSolicitud, error) {
 	if a.Rol != rolCotizacion && a.Rol != rolAdministrador && a.Rol != RolJefeOperativo {
 		return nil, platformerrors.NewProhibido("operacion: el rol %q no ve el histórico de la solicitud", a.Rol)
@@ -71,7 +77,8 @@ func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operc
 		Accion: "creada", AEstado: est(estados.EstadoSolicitudSolicitado), ActorId: actor(creadoPor), En: f.CreadoEn,
 	}})
 
-	versiones, err := cotizaciones(ctx, tx, id)
+	comercial := a.veComercial()
+	versiones, err := cotizaciones(ctx, tx, id, comercial)
 	if err != nil {
 		return nil, err
 	}
@@ -91,12 +98,15 @@ func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operc
 			rows.Close()
 			return nil, fmt.Errorf("solicitudes: leer una transición: %w", err)
 		}
+		if !comercial && accion == "pago_revertido" { // DEC-148 #73
+			motivo = nil
+		}
 		it := operclient.HistoricoSolicitudItem{
 			Accion: accion, DeEstado: est(estados.EstadoSolicitud(de)), AEstado: est(estados.EstadoSolicitud(a)),
 			ActorId: actor(actorID), Motivo: motivo, MarcaPenalizacion: marca, En: en,
 		}
 		if accion == "cotizada" { // la primera cotización nace con la transición: versión 1
-			if c, ok := versiones[1]; ok {
+			if c, ok := versiones[1]; ok && comercial {
 				cc := c.cot
 				it.Cotizacion = &cc
 			}
@@ -113,9 +123,11 @@ func (s *Servicio) Historico(ctx context.Context, a Actor, id uuid.UUID) (*operc
 			continue // ya va en `cotizada`
 		}
 		cc := c.cot
-		items = append(items, entrada{item: operclient.HistoricoSolicitudItem{
-			Accion: "recotizada", ActorId: actor(c.actor), Cotizacion: &cc, En: cc.EntregadaEn,
-		}, rank: 2, orden: int64(v)})
+		it := operclient.HistoricoSolicitudItem{Accion: "recotizada", ActorId: actor(c.actor), En: cc.EntregadaEn}
+		if comercial {
+			it.Cotizacion = &cc
+		}
+		items = append(items, entrada{item: it, rank: 2, orden: int64(v)})
 	}
 
 	rows, err = tx.Query(ctx,
@@ -163,11 +175,15 @@ type versionCotizacion struct {
 	actor *string
 }
 
-// cotizaciones lee todas las versiones de la cotización, por número de versión.
-func cotizaciones(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[int]versionCotizacion, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT version, monto::text, moneda, fecha_hora_servicio, notas, entregada_en, vigente_hasta, actor_id
-		   FROM solicitudes.cotizacion WHERE solicitud_id = $1`, id)
+// cotizaciones lee las versiones de la cotización, por número de versión. Con
+// comercial=false solo trae lo que ordena el histórico (versión, instante de
+// entrega, vigencia y actor): ni monto, ni moneda, ni notas, ni la fecha cotizada.
+func cotizaciones(ctx context.Context, tx pgx.Tx, id uuid.UUID, comercial bool) (map[int]versionCotizacion, error) {
+	cols := `version, monto::text, moneda, fecha_hora_servicio, notas, entregada_en, vigente_hasta, actor_id`
+	if !comercial {
+		cols = `version, entregada_en, vigente_hasta, actor_id`
+	}
+	rows, err := tx.Query(ctx, `SELECT `+cols+` FROM solicitudes.cotizacion WHERE solicitud_id = $1`, id)
 	if err != nil {
 		return nil, fmt.Errorf("solicitudes: leer las cotizaciones: %w", err)
 	}
@@ -177,7 +193,11 @@ func cotizaciones(ctx context.Context, tx pgx.Tx, id uuid.UUID) (map[int]version
 		var c operclient.Cotizacion
 		var vig time.Time
 		var actor *string
-		if err := rows.Scan(&c.Version, &c.Monto, &c.Moneda, &c.FechaHoraServicio, &c.Notas, &c.EntregadaEn, &vig, &actor); err != nil {
+		dest := []any{&c.Version, &c.EntregadaEn, &vig, &actor}
+		if comercial {
+			dest = []any{&c.Version, &c.Monto, &c.Moneda, &c.FechaHoraServicio, &c.Notas, &c.EntregadaEn, &vig, &actor}
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("solicitudes: leer una cotización: %w", err)
 		}
 		c.VigenteHasta = openapi_types.Date{Time: vig}
