@@ -66,19 +66,24 @@ type fila struct {
 	CreadoEn          time.Time
 }
 
+// columnasFila y destino son las columnas de solicitud y dónde escanearlas.
+const columnasFila = `id, cliente_id, estado, marca_penalizacion, origen, destinos, fecha_hora_servicio, tipo_servicio, tracto, creado_en`
+
+func (f *fila) destino(estado *string) []any {
+	return []any{&f.ID, &f.ClienteID, estado, &f.Marca, &f.Origen, &f.Destinos, &f.FechaHoraServicio, &f.TipoServicio, &f.Tracto, &f.CreadoEn}
+}
+
 // cargar lee la solicitud y, si bloquear, toma la fila FOR UPDATE: los comandos
 // serializan sobre ella, así dos acciones concurrentes no se cuelan entre la
 // guarda y la escritura. 404 si no existe.
 func cargar(ctx context.Context, tx pgx.Tx, id uuid.UUID, bloquear bool) (*fila, error) {
-	q := `SELECT id, cliente_id, estado, marca_penalizacion, origen, destinos, fecha_hora_servicio, tipo_servicio, tracto, creado_en
-	        FROM solicitudes.solicitud WHERE id = $1`
+	q := `SELECT ` + columnasFila + ` FROM solicitudes.solicitud WHERE id = $1`
 	if bloquear {
 		q += ` FOR UPDATE`
 	}
 	var f fila
 	var estado string
-	err := tx.QueryRow(ctx, q, id).Scan(&f.ID, &f.ClienteID, &estado, &f.Marca, &f.Origen, &f.Destinos,
-		&f.FechaHoraServicio, &f.TipoServicio, &f.Tracto, &f.CreadoEn)
+	err := tx.QueryRow(ctx, q, id).Scan(f.destino(&estado)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: solicitud %s no encontrada", id)
 	}
@@ -125,7 +130,7 @@ func (s *Servicio) enTx(ctx context.Context, id uuid.UUID, delCliente bool, a Ac
 	if err := fn(tx, f); err != nil {
 		return nil, err
 	}
-	out, err := armar(ctx, tx, f)
+	out, err := s.armar(ctx, tx, f, a)
 	if err != nil {
 		return nil, err
 	}
@@ -135,9 +140,9 @@ func (s *Servicio) enTx(ctx context.Context, id uuid.UUID, delCliente bool, a Ac
 	return out, nil
 }
 
-// armar convierte la fila en la Solicitud del contrato.
-// shortcut: avisos va vacío; se derivan del estado y la hora en E10-T10.
-func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, error) {
+// armar convierte la fila en la Solicitud del contrato, con las marcas de aviso
+// que le tocan al actor (avisos, lectura.go).
+func (s *Servicio) armar(ctx context.Context, tx pgx.Tx, f *fila, a Actor) (*operclient.Solicitud, error) {
 	cid := operclient.Id(f.ClienteID)
 	cot, err := cotizacionVigente(ctx, tx, f.ID)
 	if err != nil {
@@ -152,7 +157,7 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 	if f.Estado == estados.EstadoSolicitudRechazadoPorAi27 {
 		if err := tx.QueryRow(ctx,
 			`SELECT motivo FROM solicitudes.transicion_solicitud
-			  WHERE solicitud_id = $1 AND a_estado = 'RECHAZADO_POR_AI27' ORDER BY id DESC LIMIT 1`, f.ID).Scan(&motivoRechazo); err != nil {
+			  WHERE solicitud_id = $1 AND a_estado = 'RECHAZADO_POR_AI27' ORDER BY id DESC LIMIT 1`, f.ID).Scan(&motivoRechazo); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("solicitudes: leer el motivo del rechazo: %w", err)
 		}
 	}
@@ -169,7 +174,7 @@ func armar(ctx context.Context, tx pgx.Tx, f *fila) (*operclient.Solicitud, erro
 		Cotizacion:        cot,
 		Pago:              pago,
 		MarcaPenalizacion: f.Marca,
-		Avisos:            []string{},
+		Avisos:            s.avisos(a, f, cot),
 		CreadoEn:          f.CreadoEn,
 	}, nil
 }
@@ -233,7 +238,7 @@ func (s *Servicio) Crear(ctx context.Context, a Actor, in operclient.CrearSolici
 	if err != nil {
 		return nil, err
 	}
-	out, err := armar(ctx, tx, f)
+	out, err := s.armar(ctx, tx, f, a)
 	if err != nil {
 		return nil, err
 	}

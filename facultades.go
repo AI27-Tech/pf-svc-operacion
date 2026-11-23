@@ -42,7 +42,11 @@ var facultades = map[string][]roles.Rol{
 	"revertirPago":  {roles.RolAdministrador},
 	// El jefe operativo aprueba y rechaza la solicitud pagada; el administrador
 	// hereda (DEC-148 #20). Aprobar crea el viaje en la misma transacción (ADR 39).
-	"aprobarSolicitud":  {roles.RolJefeOperativo, roles.RolAdministrador},
+	"aprobarSolicitud": {roles.RolJefeOperativo, roles.RolAdministrador},
+	// Lectura (E10-T9): quién toca solicitudes. El alcance fino (organización,
+	// PAGADO para el jefe operativo) lo aplica el módulo; el resto de los roles, 403.
+	"listarSolicitudes": {roles.RolCliente, roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
+	"obtenerSolicitud":  {roles.RolCliente, roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
 	"rechazarSolicitud": {roles.RolJefeOperativo, roles.RolAdministrador},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
 	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},

@@ -21,6 +21,8 @@ func (m *Module) rutasSolicitudes(mux *http.ServeMux, protegido func(http.Handle
 		return
 	}
 	mux.Handle("POST /api/v1/solicitudes", protegido(http.HandlerFunc(m.handleCrearSolicitud)))
+	mux.Handle("GET /api/v1/solicitudes", protegido(http.HandlerFunc(m.handleListarSolicitudes)))
+	mux.Handle("GET /api/v1/solicitudes/{id}", protegido(http.HandlerFunc(m.handleObtenerSolicitud)))
 	mux.Handle("PUT /api/v1/solicitudes/{id}/cotizacion", protegido(http.HandlerFunc(m.handleCotizarSolicitud)))
 	mux.Handle("PUT /api/v1/solicitudes/{id}/fecha-hora", protegido(http.HandlerFunc(m.handleReprogramarSolicitud)))
 	mux.Handle("POST /api/v1/solicitudes/{id}/rechazo-cotizacion", protegido(http.HandlerFunc(m.handleRechazarCotizacion)))
@@ -301,4 +303,49 @@ func (m *Module) rechazarSolicitud(ctx context.Context, id operclient.Id, body o
 		return nil, err
 	}
 	return m.solicitudes.Rechazar(ctx, a, id, body)
+}
+
+// handleListarSolicitudes atiende GET /api/v1/solicitudes?estado=&cursor=.
+func (m *Module) handleListarSolicitudes(w http.ResponseWriter, r *http.Request) {
+	var params operclient.ListarSolicitudesParams
+	if v := r.URL.Query().Get("estado"); v != "" {
+		e := operclient.EstadoSolicitud(v)
+		params.Estado = &e
+	}
+	if v := r.URL.Query().Get("cursor"); v != "" {
+		params.Cursor = &v
+	}
+	p, err := m.listarSolicitudes(r.Context(), params)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	escribirJSON(w, http.StatusOK, p)
+}
+
+// handleObtenerSolicitud atiende GET /api/v1/solicitudes/{id}.
+func (m *Module) handleObtenerSolicitud(w http.ResponseWriter, r *http.Request) {
+	id, err := idSolicitud(r)
+	if err != nil {
+		escribirError(w, err)
+		return
+	}
+	s, err := m.obtenerSolicitud(r.Context(), id)
+	responder(w, s, err)
+}
+
+func (m *Module) listarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error) {
+	a, err := actorConFacultad(ctx, "listarSolicitudes")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Listar(ctx, a, params.Estado, params.Cursor)
+}
+
+func (m *Module) obtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	a, err := actorConFacultad(ctx, "obtenerSolicitud")
+	if err != nil {
+		return nil, err
+	}
+	return m.solicitudes.Obtener(ctx, a, id)
 }

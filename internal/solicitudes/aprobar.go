@@ -13,14 +13,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// RolJefeOperativo es el rol que ve solo las solicitudes en PAGADO (DEC-148 #22).
-const RolJefeOperativo = "jefe_operativo"
-
-// resolviendo es la guarda de visibilidad de las acciones del jefe operativo: una
-// solicitud que no está en PAGADO no existe para él (404), igual que en las
-// lecturas (contrato de aprobarSolicitud: "el 409 lo ve el administrador").
+// resolviendo es la guarda de visibilidad de las acciones sobre una solicitud
+// existente: la que el actor no ve no existe para él (404), igual que en las
+// lecturas (contrato de aprobarSolicitud: el jefe operativo ve 404 fuera de
+// PAGADO y el 409 lo ve el administrador).
 func (a Actor) resolviendo(f *fila) error {
-	if a.Rol == RolJefeOperativo && f.Estado != estados.EstadoSolicitudPagado {
+	if !a.puedeVer(f) {
 		return platformerrors.NewNoEncontrado("operacion: solicitud %s no encontrada", f.ID)
 	}
 	return nil
