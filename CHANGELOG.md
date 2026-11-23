@@ -13,6 +13,14 @@
 - Pruebas: alcance por rol en listado y por id, paginación con empates, fronteras de "por vencer" con reloj, avisos por rol, misma fila antes y después de aprobar, cotización vigente, y la tabla rol × acción completa (9 roles × 11 acciones) por HTTP.
 - **Pendiente de este tramo:** los 12 métodos nuevos de `ConsultasAPI` y el histórico (`ListarHistoricoSolicitud`) llegan con E10-T11.
 
+## 2026-11-24 13:00 — `solicitudes`: pruebas de la forma de `viaje.*` y del `search_path` al aprobar (revisión de #108)
+
+**Para quién:** quien mantiene `operacion`, `reportes` y `mensajeria`. Sin cambio de comportamiento.
+
+**Cambios:**
+- `aprobar_test.go`: `TestAprobarPublicaLaFormaDeViajesCrear` fija clave por clave el payload, `Version`, `agregado_id` y `ocurrido_en` de `viaje.creado` y `viaje.mensajeria_habilitada` con valores escritos a mano, los mismos que emite `viajes.Crear` (`reportes` lee `creado_en`; `mensajeria`, `viaje_id` y `cliente_id`). `TestPublicarEnViajesRestauraElSearchPath` afirma que un evento publicado después en la misma transacción va a `solicitudes.outbox` y no a `viajes.outbox`.
+- `aprobar.go`: solo comentarios. `TODO(producto)` de aprobar con la fecha del servicio ya pasada (DEC-148 #66 no lo cubre), `TODO(arquitectura)` del bloqueo antes de la guarda de visibilidad, y la fragilidad del `search_path` apuntando a su prueba.
+
 ## 2026-11-24 12:00 — `solicitudes`: aprobar y rechazar, con el viaje creado en la misma transacción (E10-T8, ADR 39, DEC-148 #3, #52, #58)
 
 **Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Cambia comportamiento: rutas nuevas `POST /api/v1/solicitudes/{id}/aprobacion` y `/rechazo`; toda transición de la solicitud queda auditada.
@@ -25,6 +33,14 @@
 - `maquina.go`: `transicionar` escribe ahora la auditoría (`auditoria.registro_auditoria`, módulo `solicitudes`) con el interceptor, en la misma transacción. `viaje_id` queda en NULL y el id de la solicitud va en `detalle`: el expediente del viaje no debe mostrar acciones comerciales de la etapa de cotización. Sin datos comerciales en el detalle.
 - `facultades.go` y `solicitudes.go`: facultad `jefe_operativo` y `administrador` y las dos rutas.
 - Pruebas: viaje, destinos, eventos y auditoría con valores a mano; guardas por estado y rol; atomicidad con falla inyectada en seis puntos (incluido el commit); carreras aprobar/aprobar, aprobar/rechazar y aprobar/cancelar; facultad por rol por HTTP.
+
+## 2026-11-24 12:00 — `solicitudes`: el vencimiento ya no cierra una solicitud recién recotizada (E10-T7, revisión de #107)
+
+**Para quién:** quien mantiene `operacion`. Corrige un defecto: una solicitud recotizada justo cuando el worker la tomaba podía quedar `VENCIDA` con una cotización vigente recién entregada (recuperable por la vía de `VENCIDA → PAGADO`, #64).
+
+**Cambios:**
+- `vencimiento.go`: `vencer` repite la condición (estado `COTIZADO` y vigencia de la última versión terminada) con una consulta nueva DESPUÉS de tomar el bloqueo. La sentencia que bloquea evalúa la vigencia con la instantánea de su inicio, y una recotización sin cambio de fecha no actualiza la fila de `solicitud`, así que Postgres no la reevaluaba.
+- Prueba `TestVencerNoCierraUnaSolicitudRecotizadaEnCarrera`: lanza `vencer` y `Cotizar` a la vez sobre 2400 solicitudes; sin el arreglo fallan unas 25, con él ninguna.
 
 ## 2026-11-24 09:00 — `solicitudes`: vencimiento automático de la cotización (E10-T7, DEC-148 #15, #50, #63)
 
