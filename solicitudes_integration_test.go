@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
 	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
@@ -118,7 +119,9 @@ func TestCotizacionYRespuestaHTTP(t *testing.T) {
 	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorRoles{tenant: tenant.String()}, Atomos: catalogo})
 	mux := http.NewServeMux()
 	m.Routes(mux)
-	const cot = `{"monto":"2500.00","moneda":"MXN","fecha_hora_servicio":"2026-12-10T16:00:00Z"}`
+	// Fecha futura relativa: la regla de DEC-148 #66 usa el reloj real aquí y una fecha fija caducaría.
+	fut := time.Now().AddDate(1, 0, 0).UTC().Format(time.RFC3339)
+	cot := `{"monto":"2500.00","moneda":"MXN","fecha_hora_servicio":"` + fut + `"}`
 
 	crear := func() string {
 		rec := llamar(t, mux, http.MethodPost, "/api/v1/solicitudes", "cliente", `{"origen":"CDMX","destinos":[{"nombre":"GDL"}]}`)
@@ -143,7 +146,7 @@ func TestCotizacionYRespuestaHTTP(t *testing.T) {
 		if got := llamar(t, mux, http.MethodPut, ruta+"/cotizacion", rol, cot).Code; got != http.StatusForbidden {
 			t.Errorf("cotizar como %s: %d, quería 403", rol, got)
 		}
-		if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", rol, `{"fecha_hora_servicio":"2026-12-11T16:00:00Z","motivo":"x"}`).Code; got != http.StatusForbidden {
+		if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", rol, `{"fecha_hora_servicio":"`+fut+`","motivo":"x"}`).Code; got != http.StatusForbidden {
 			t.Errorf("reprogramar como %s: %d, quería 403", rol, got)
 		}
 	}
@@ -173,7 +176,7 @@ func TestCotizacionYRespuestaHTTP(t *testing.T) {
 		t.Fatalf("recotizar como administrador: %d %s", rec.Code, rec.Body)
 	}
 	// Reprogramar en COTIZADO: 409.
-	if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", "cotizacion", `{"fecha_hora_servicio":"2026-12-11T16:00:00Z","motivo":"x"}`).Code; got != http.StatusConflict {
+	if got := llamar(t, mux, http.MethodPut, ruta+"/fecha-hora", "cotizacion", `{"fecha_hora_servicio":"`+fut+`","motivo":"x"}`).Code; got != http.StatusConflict {
 		t.Errorf("reprogramar en COTIZADO: %d, quería 409", got)
 	}
 	// Otra organización: 404, no 403.

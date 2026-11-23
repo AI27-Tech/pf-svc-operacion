@@ -43,27 +43,33 @@ func vigenteHasta(entrega time.Time) time.Time {
 	return diaMX(entrega).AddDate(0, 0, diasVigencia)
 }
 
+// monedaUnica es la única moneda aceptada (DEC-148 #62).
+const monedaUnica = "MXN"
+
 // montoValido es el formato de Monto del contrato: decimal en texto, sin signo.
 var montoValido = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 
 // Cotizar envía la primera cotización (SOLICITADO -> COTIZADO) o recotiza
 // (COTIZADO, sin cambio de estado). Cada llamada agrega una versión y conserva las
 // anteriores (DEC-148 #42); la vigencia corre desde esta entrega. Exige monto,
-// moneda y fecha y hora del servicio (DEC-148 #39, #41), que puede diferir de la
+// moneda (solo MXN, DEC-148 #62; el monto admite cero) y fecha y hora del servicio
+// (DEC-148 #39, #41), posterior a ahora (DEC-148 #66) y que puede diferir de la
 // que pidió el cliente. No valida disponibilidad de unidades (DEC-148 #23). En
 // cualquier otro estado (PAGADO, VENCIDA, APROBADO, terminales) responde 409
 // (DEC-148 #36). La validación de entrada va antes de tocar la base.
 func (s *Servicio) Cotizar(ctx context.Context, a Actor, id uuid.UUID, in operclient.CotizacionEntrada) (*operclient.Solicitud, error) {
-	// TODO(producto): catálogo de monedas aceptadas y si el monto admite cero; hoy
-	// moneda es texto no vacío y el monto cumple el formato del contrato.
 	if !montoValido.MatchString(in.Monto) {
-		return nil, platformerrors.NewValidacion("operacion: monto es obligatorio y debe ser un decimal sin signo")
+		return nil, platformerrors.NewValidacion("operacion: monto es obligatorio y debe ser un decimal sin signo (el cero se admite)")
 	}
-	if strings.TrimSpace(in.Moneda) == "" {
-		return nil, platformerrors.NewValidacion("operacion: moneda es obligatoria")
+	// DEC-148 #62: la única moneda es MXN. El contrato la tipa como string libre.
+	if in.Moneda != monedaUnica {
+		return nil, platformerrors.NewValidacion("operacion: moneda debe ser %s", monedaUnica)
 	}
 	if in.FechaHoraServicio.IsZero() {
 		return nil, platformerrors.NewValidacion("operacion: fecha_hora_servicio es obligatoria para cotizar")
+	}
+	if err := s.exigeFutura(in.FechaHoraServicio); err != nil {
+		return nil, err
 	}
 	return s.enTx(ctx, id, false, a, func(tx pgx.Tx, f *fila) error {
 		if f.Estado != estados.EstadoSolicitudSolicitado && f.Estado != estados.EstadoSolicitudCotizado {
@@ -83,7 +89,7 @@ func (s *Servicio) Cotizar(ctx context.Context, a Actor, id uuid.UUID, in opercl
 			   (solicitud_id, version, monto, moneda, fecha_hora_servicio, notas, entregada_en, vigente_hasta, actor_id, actor_rol)
 			 SELECT $1, COALESCE(max(version), 0) + 1, $2::numeric, $3, $4, $5, $6, $7, $8, $9
 			   FROM solicitudes.cotizacion WHERE solicitud_id = $1`,
-			id, in.Monto, strings.TrimSpace(in.Moneda), fecha, in.Notas, en, vigenteHasta(en), nullsiVacio(a.Subject), nullsiVacio(a.Rol),
+			id, in.Monto, in.Moneda, fecha, in.Notas, en, vigenteHasta(en), nullsiVacio(a.Subject), nullsiVacio(a.Rol),
 		); err != nil {
 			return fmt.Errorf("solicitudes: insertar cotización: %w", err)
 		}
@@ -98,7 +104,8 @@ func (s *Servicio) Cotizar(ctx context.Context, a Actor, id uuid.UUID, in opercl
 
 // Reprogramar cambia la fecha y hora de una solicitud PAGADO. Motivo obligatorio;
 // sin cambio de estado ni pago nuevo; queda en reprogramacion_solicitud con actor,
-// motivo y marca de tiempo (DEC-148 #24, #40).
+// motivo y marca de tiempo (DEC-148 #24, #40). La fecha nueva debe ser posterior a
+// ahora (DEC-148 #66).
 func (s *Servicio) Reprogramar(ctx context.Context, a Actor, id uuid.UUID, in operclient.ReprogramacionEntrada) (*operclient.Solicitud, error) {
 	motivo := strings.TrimSpace(in.Motivo)
 	if motivo == "" {
@@ -106,6 +113,9 @@ func (s *Servicio) Reprogramar(ctx context.Context, a Actor, id uuid.UUID, in op
 	}
 	if in.FechaHoraServicio.IsZero() {
 		return nil, platformerrors.NewValidacion("operacion: fecha_hora_servicio es obligatoria")
+	}
+	if err := s.exigeFutura(in.FechaHoraServicio); err != nil {
+		return nil, err
 	}
 	return s.enTx(ctx, id, false, a, func(tx pgx.Tx, f *fila) error {
 		if f.Estado != estados.EstadoSolicitudPagado {
