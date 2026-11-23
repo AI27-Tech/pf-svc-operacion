@@ -39,8 +39,8 @@ func vigenciaTerminada(hoy string) string {
 // COTIZADO y esta función la cierra en su siguiente corrida (DEC-148 #63).
 //
 // Una sola ejecución con varias réplicas: cada solicitud se cierra en su propia
-// transacción tomando su fila con FOR UPDATE SKIP LOCKED y repitiendo ahí la
-// condición. La réplica que llega segunda ve la fila bloqueada (la salta) o ya
+// transacción tomando su fila con FOR UPDATE SKIP LOCKED y repitiendo la
+// condición con una consulta nueva ya con la fila bloqueada. La réplica que llega segunda ve la fila bloqueada (la salta) o ya
 // cerrada (no cumple la condición) y no hace nada; no hay lock global que
 // serialice a las réplicas ni espera entre ellas. Una confirmación de pago en
 // vuelo bloquea la misma fila: gana el pago y la solicitud no vence (#15).
@@ -107,6 +107,19 @@ func (s *Servicio) vencer(ctx context.Context, id uuid.UUID, hoy time.Time) (boo
 	}
 	if err != nil {
 		return false, fmt.Errorf("solicitudes: bloquear la solicitud: %w", err)
+	}
+	// Repetir la condición con una instantánea nueva, ya con la fila bloqueada. La
+	// sentencia de arriba evalúa la vigencia con la instantánea de su inicio: una
+	// recotización confirmada antes del bloqueo, que no cambia la fila de solicitud,
+	// no la reevalúa y se vencería una cotización vigente recién entregada.
+	var aun bool
+	if err := tx.QueryRow(ctx,
+		`SELECT s.estado = $2 AND `+vigenciaTerminada("$3")+` FROM solicitudes.solicitud s WHERE s.id = $1`,
+		id, string(estados.EstadoSolicitudCotizado), hoy).Scan(&aun); err != nil {
+		return false, fmt.Errorf("solicitudes: revisar la vigencia bajo el bloqueo: %w", err)
+	}
+	if !aun {
+		return false, nil
 	}
 	f, err := cargar(ctx, tx, id, false) // ya está bloqueada arriba
 	if err != nil {

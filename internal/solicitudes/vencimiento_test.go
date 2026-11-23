@@ -333,3 +333,49 @@ func TestVencerRevisaDeNuevoBajoElBloqueo(t *testing.T) {
 		t.Errorf("no debe cerrar una solicitud vigente; ok=%v err=%v estado=%s", ok, err, estadoDe(t, ctx, id))
 	}
 }
+
+// TestVencerNoCierraUnaSolicitudRecotizadaEnCarrera: la recotización que se
+// confirma mientras vencer toma la fila no debe dejar la solicitud en VENCIDA con
+// una cotización vigente. Postgres evalúa la vigencia con la instantánea del
+// inicio de la sentencia; si la repetición bajo el bloqueo va en la MISMA
+// sentencia que lo toma, una recotización confirmada en medio (que no cambia la
+// fila de solicitud) pasa inadvertida. La ventana es de microsegundos, así que la
+// prueba lanza vencer y Cotizar a la vez sobre muchas solicitudes: sin la consulta
+// nueva tras el bloqueo, unos 25 de 2400 pares terminan mal (medido). Con la
+// corrección no hay ninguno.
+func TestVencerNoCierraUnaSolicitudRecotizadaEnCarrera(t *testing.T) {
+	ctx, svc := prepara(t)
+	conRelojEn(svc, diaSiguiente) // la v1 (vigente hasta el 5-dic) ya terminó; la v2 vence el 21-dic
+	hoy := diaMX(diaSiguiente)
+
+	const rondas, porRonda = 4, 600
+	var malas []uuid.UUID
+	for r := 0; r < rondas; r++ {
+		ids := make([]uuid.UUID, porRonda)
+		for i := range ids {
+			ids[i] = uuid.New()
+		}
+		ejecuta(t, ctx, `INSERT INTO solicitudes.solicitud (id, cliente_id, estado, marca_penalizacion, origen, destinos, creado_en)
+		  SELECT i, gen_random_uuid(), 'COTIZADO', false, 'A', '[{"nombre":"B"}]'::jsonb, now() FROM unnest($1::uuid[]) i`, ids)
+		ejecuta(t, ctx, `INSERT INTO solicitudes.cotizacion (solicitud_id, version, monto, moneda, fecha_hora_servicio, entregada_en, vigente_hasta)
+		  SELECT i, 1, 100, 'MXN', '2026-12-10T16:00:00Z', '2026-11-21T05:30:00Z', '2026-12-05' FROM unnest($1::uuid[]) i`, ids)
+		salida := make(chan struct{})
+		var wg sync.WaitGroup
+		for _, id := range ids {
+			wg.Add(2)
+			go func() { defer wg.Done(); <-salida; _, _ = svc.vencer(ctx, id, hoy) }()
+			go func() { defer wg.Done(); <-salida; _, _ = svc.Cotizar(ctx, actorCotizacion, id, cotizacionBase()) }()
+		}
+		close(salida)
+		wg.Wait()
+		for _, id := range ids {
+			if estadoDe(t, ctx, id) == "VENCIDA" &&
+				consulta[int](t, ctx, `SELECT count(*) FROM solicitudes.cotizacion WHERE solicitud_id=$1`, id) > 1 {
+				malas = append(malas, id)
+			}
+		}
+	}
+	if len(malas) > 0 {
+		t.Errorf("%d solicitudes quedaron VENCIDA con una cotización vigente recién entregada, p. ej. %s", len(malas), malas[0])
+	}
+}
