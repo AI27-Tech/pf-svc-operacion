@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## 2026-11-23 17:30 — `solicitudes`: la fecha del servicio al crear debe ser futura (DEC-148 #66)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: `Crear` con `fecha_hora_servicio` en el pasado responde `400`.
+
+**Cambios:** `exigeFutura` (`servicio.go`) rechaza una fecha igual o anterior al reloj del servicio; `Crear` la aplica cuando el cliente envía fecha (es opcional). Se compara el instante, que da lo mismo medido en `America/Mexico_City` que en UTC. `TestCrear` usa un reloj fijo y cubre ayer, igual a ahora, un segundo antes, hora en CDMX y un segundo después (se acepta).
+
+## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento: cierra los hallazgos de pruebas y comentarios del informe `semantic-review/2026-11-21-pr-103-105-operacion-solicitudes.md`.
+
+**Cambios:**
+- `TestCarreraCancelarVsPagarSerializa`: 40 carreras cancelar vs pagar sobre la misma solicitud; falla si `cargar` pierde `FOR UPDATE` (verificado con la mutación).
+- `TestMetadatosDeAristasADR38`: disparador, acción, guarda de motivo y marca de las 11 aristas con valores escritos a mano desde el ADR 38 y el OpenAPI, independientes de `aristas`.
+- `TestRelayDeSolicitudesEntregaAlBus`: `solicitud.creada` llega al bus por `outbox-relay:solicitudes` con el pool `op_solicitudes`.
+- Comentarios: ya no dicen que el outbox de `viajes` es el único de `operacion` (`operacion.go`, `internal/asignacion/doc.go`); el comentario DEC-060 #2 de `facultades.go` vuelve a `guardarFicha`.
+
+## 2026-11-23 10:34 — módulo `solicitudes`: máquina de estados y crear la solicitud (E10-T2, E10-T3; ADR 38, DEC-148)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Agrega la ruta `POST /api/v1/solicitudes` (solo el cliente) y el pool opcional `Pools.Solicitudes`; sin ese pool no se monta nada y el resto del servicio no cambia. `core` debe pasar el pool de `op_solicitudes` con `search_path=solicitudes` (no se toca `pf-svc-core` aquí).
+
+**Resumen:** `solicitudes` es el único dueño de las transiciones de la solicitud: una sola función (`transicionar`) valida contra `estados.PuedeTransicionarSolicitud` (tracer.45), el disparador de la arista y la guarda de motivo, y escribe el estado, su fila en `transicion_solicitud` y el evento `solicitud.estado_cambiado` en la misma transacción. Crear la solicitud nace en `SOLICITADO` con la organización del token y publica `solicitud.creada` por el outbox del esquema `solicitudes` (payload generado del contrato, sin datos comerciales ni marca de penalización).
+
+**Cambios:**
+- `migrations/solicitudes/0003_solicitud.sql` (nuevo): tablas `solicitud` (CHECK del enum de estados y de la marca de penalización), `transicion_solicitud` (solo `INSERT`) y `outbox`; `GRANT` mínimos de `op_solicitudes` (`UPDATE` solo de `estado`, `marca_penalizacion` y `fecha_hora_servicio`).
+- `internal/solicitudes/` (nuevo): `maquina.go` (aristas del ADR 38, `transicionar`, publicación de eventos), `servicio.go` (`Crear`, carga con bloqueo), `doc.go`.
+- `solicitudes.go`, `operacion.go`, `facultades.go` (nuevo/editados): `Pools.Solicitudes`, relay `outbox-relay:solicitudes`, ruta y facultad `crearSolicitud` (solo `cliente`).
+- Pruebas: `internal/solicitudes/maquina_test.go`, `integracion_test.go` (los 64 pares de estados contra Postgres, rechazos, atomicidad con falla inyectada, CHECK, privilegios, creación); `solicitudes_integration_test.go` (HTTP por rol); `consultas_integration_test.go` (el módulo de prueba pasa el pool).
+- `go.mod`: `google.golang.org/protobuf` pasa de indirecta a directa (serializa los eventos).
+
+**Pendiente (otras historias):** las demás acciones (E10-T4 a T6), vencimiento, aprobación, permisos por rol sobre lectura, bandejas, avisos (`avisos` sale vacío) y auditoría histórica (E10-T7 a T11); los métodos de `ConsultasAPI`; el cableado en `pf-svc-core`.
+
 ## 2026-11-20 14:50 — esquema `solicitudes`, rol `op_solicitudes` y su excepción de GRANT (E10-T1, ADR 39)
 
 **Para quién:** quien mantiene `operacion` y `pf-svc-core`. No cambia ninguna API: deja listo el esquema donde vivirá el módulo de solicitudes (E10-T2 en adelante) y los privilegios con los que su aprobación creará el viaje en la misma transacción.

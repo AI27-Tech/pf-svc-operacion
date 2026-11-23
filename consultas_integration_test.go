@@ -161,7 +161,7 @@ func moduloCompletoCon(t *testing.T, ctx context.Context, d operacion.Deps) *ope
 	dbtest.Exec(t, ctx, admin,
 		"TRUNCATE viajes.viaje, viajes.destino, viajes.condicion_viaje, viajes.estadia, viajes.transicion_viaje, viajes.outbox, viajes.alcance_sujeto, "+
 			"asignacion.asignacion_viaje, asignacion.reserva_recurso, asignacion.historia_asignacion, auditoria.registro_auditoria, bitacora.entrada_bitacora, "+
-			"roster.unidad_custodio, roster.unidad")
+			"roster.unidad_custodio, roster.unidad, solicitudes.solicitud, solicitudes.transicion_solicitud, solicitudes.outbox CASCADE")
 	pool := func(rol, searchPath string) *platformpgx.Pool {
 		p, cerrarPool := dbtest.PoolAs(t, ctx, rol, searchPath)
 		t.Cleanup(cerrarPool)
@@ -173,6 +173,8 @@ func moduloCompletoCon(t *testing.T, ctx context.Context, d operacion.Deps) *ope
 		Bitacora:   pool("op_bitacora", ""),
 		Roster:     pool("op_roster", ""),
 		Auditoria:  pool("op_auditoria", ""),
+		// Solicitudes escribe su outbox sin calificar: search_path=solicitudes.
+		Solicitudes: pool("op_solicitudes", "solicitudes"),
 	}, d)
 	if err != nil {
 		t.Fatalf("operacion.New: %v", err)
