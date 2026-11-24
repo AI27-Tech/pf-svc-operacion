@@ -27,6 +27,29 @@ var facultades = map[string][]roles.Rol{
 	// DEC-060 #1: el jefe_operativo aprueba, y completa la fecha/hora antes de
 	// aprobar (E1-T3, guarda fecha_hora_servicio_definida).
 	"completarFechaHora": {roles.RolJefeOperativo, roles.RolAdministrador},
+	// E10 (ADR 38, DEC-148): el cliente crea la solicitud. El resto de las acciones
+	// de la solicitud se agregan con su historia; el alcance fino por rol es E10-T9.
+	"crearSolicitud": {roles.RolCliente},
+	// cotizacion cotiza, recotiza y reprograma; el administrador hereda sus
+	// facultades (DEC-148 #20). El cliente rechaza la cotización y cancela.
+	"cotizarSolicitud":     {roles.RolCotizacion, roles.RolAdministrador},
+	"reprogramarSolicitud": {roles.RolCotizacion, roles.RolAdministrador},
+	"rechazarCotizacion":   {roles.RolCliente},
+	"cancelarSolicitud":    {roles.RolCliente},
+	// cotizacion confirma el pago (el administrador hereda); solo el administrador
+	// lo revierte (DEC-148 #37).
+	"confirmarPago": {roles.RolCotizacion, roles.RolAdministrador},
+	"revertirPago":  {roles.RolAdministrador},
+	// El jefe operativo aprueba y rechaza la solicitud pagada; el administrador
+	// hereda (DEC-148 #20). Aprobar crea el viaje en la misma transacción (ADR 39).
+	"aprobarSolicitud": {roles.RolJefeOperativo, roles.RolAdministrador},
+	// Lectura (E10-T9): quién toca solicitudes. El alcance fino (organización,
+	// PAGADO para el jefe operativo) lo aplica el módulo; el resto de los roles, 403.
+	"listarSolicitudes": {roles.RolCliente, roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
+	"obtenerSolicitud":  {roles.RolCliente, roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
+	// El histórico es de audiencia interna: el cliente y los demás roles, 403.
+	"listarHistoricoSolicitud": {roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
+	"rechazarSolicitud":        {roles.RolJefeOperativo, roles.RolAdministrador},
 	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
 	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
 }
@@ -78,8 +101,7 @@ func exigirFacultadInterna(ctx context.Context, op string) error {
 //   - Rol sin la acción (ejecutivo; reaccion fuera de su caso; rol desconocido): 403.
 //   - jefe_operativo, administrador: todos.
 //   - monitorista, supervisor, coordinador: el viaje debe ser de sus clientes
-//     efectivos (proyección de alcance.cambiado) y haber pasado por APROBADO;
-//     si no, 404 igual que si no existiera.
+//     efectivos (proyección de alcance.cambiado); si no, 404 igual que si no existiera.
 //
 // El alcance se busca por claims.Subject: la proyección se indexa por el
 // idp_subject que publica identidad, igual al `sub` del token (DEC-149 #22).

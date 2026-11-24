@@ -4,7 +4,7 @@
 // resuelve en servidor (DEC-053 #3).
 //
 // La regla (regla.go) es pura: la usan la guarda del detalle y sus subrecursos.
-// La lista la aplica en SQL (SQLPasoPorAprobado), para no filtrar páginas en
+// La lista la aplica en SQL (listarViajes), para no filtrar páginas en
 // memoria. La proyección (proyeccion.go) vive en Postgres, en el esquema viajes:
 // el consumidor de alcance.cambiado es durable y comparte grupo entre réplicas,
 // así que una proyección en memoria solo la vería actualizada la réplica que
@@ -38,8 +38,8 @@ const (
 	Prohibido Ambito = iota
 	// Todos es el alcance global (jefe_operativo, administrador).
 	Todos
-	// PorClientes son los viajes de los clientes efectivos del sujeto que
-	// pasaron por APROBADO (DEC-149 #5, #6, #18).
+	// PorClientes son los viajes de los clientes efectivos del sujeto
+	// (DEC-149 #5, #6, #18).
 	PorClientes
 )
 
@@ -67,38 +67,13 @@ func Para(rol string, a Acceso) Ambito {
 // Hechos es lo que la regla necesita de un viaje.
 type Hechos struct {
 	ClienteID uuid.UUID
-	Estado    string
-	// CanceladoDesdeSolicitado: el viaje llegó a CANCELADO sin pasar por
-	// APROBADO (arista SOLICITADO → CANCELADO).
-	CanceladoDesdeSolicitado bool
-}
-
-// PasoPorAprobado: toda salida de SOLICITADO que no es rechazo ni cancelación
-// pasa por APROBADO (ADR 19), y un viaje creado por Operación nace en APROBADO
-// (DEC-026). Por eso basta excluir SOLICITADO, RECHAZADO_POR_AI27 y la
-// cancelación desde SOLICITADO. Gemelo de SQLPasoPorAprobado.
-func PasoPorAprobado(h Hechos) bool {
-	switch h.Estado {
-	case "SOLICITADO", "RECHAZADO_POR_AI27":
-		return false
-	case "CANCELADO":
-		return !h.CanceladoDesdeSolicitado
-	}
-	return true
 }
 
 // Visible es la regla de PorClientes: el cliente del viaje está entre los
-// clientes efectivos del sujeto y el viaje pasó por APROBADO. Sin clientes no
-// ve nada. Las unidades no intervienen: en un préstamo el viaje lo ve quien
-// tiene al cliente del viaje (DEC-149 #5, #18).
+// clientes efectivos del sujeto. Sin clientes no ve nada. Las unidades no
+// intervienen: en un préstamo el viaje lo ve quien tiene al cliente del viaje
+// (DEC-149 #5, #18). Todo viaje nace en APROBADO (ADR 38), así que el estado ya
+// no acota.
 func Visible(clientes []uuid.UUID, h Hechos) bool {
-	return slices.Contains(clientes, h.ClienteID) && PasoPorAprobado(h)
+	return slices.Contains(clientes, h.ClienteID)
 }
-
-// SQLPasoPorAprobado es PasoPorAprobado sobre `viajes.viaje v`, para el WHERE
-// de listarViajes. Mantenerlos iguales; los cubre la misma prueba de
-// integración (lista y detalle sobre el mismo juego de viajes).
-const SQLPasoPorAprobado = `v.estado NOT IN ('SOLICITADO', 'RECHAZADO_POR_AI27')
-	AND NOT (v.estado = 'CANCELADO' AND EXISTS (
-	    SELECT 1 FROM viajes.transicion_viaje t
-	     WHERE t.viaje_id = v.id AND t.de_estado = 'SOLICITADO' AND t.a_estado = 'CANCELADO'))`

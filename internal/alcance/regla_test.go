@@ -29,27 +29,11 @@ func TestPara(t *testing.T) {
 	}
 }
 
-// TestPasoPorAprobado recorre los 13 tokens: solo SOLICITADO, RECHAZADO_POR_AI27
-// y la cancelación desde SOLICITADO no pasaron por APROBADO.
-func TestPasoPorAprobado(t *testing.T) {
-	no := map[string]bool{"SOLICITADO": true, "RECHAZADO_POR_AI27": true}
-	for _, e := range []string{"SOLICITADO", "APROBADO", "RECHAZADO_POR_AI27", "RECHAZADO_POR_CLIENTE",
-		"ASIGNADO", "APTO_PARA_SALIDA", "EN_EMBARQUE", "PATRULLA_EN_CAMINO", "EN_TRANSITO",
-		"EN_DESTINO", "EN_DESCARGA", "CERRADO", "CANCELADO"} {
-		if got := PasoPorAprobado(Hechos{Estado: e}); got == no[e] {
-			t.Errorf("PasoPorAprobado(%s) = %v; quiere %v", e, got, !no[e])
-		}
-	}
-	if PasoPorAprobado(Hechos{Estado: "CANCELADO", CanceladoDesdeSolicitado: true}) {
-		t.Error("CANCELADO desde SOLICITADO: quiere false")
-	}
-}
-
-// TestVisible: cliente en el conjunto y paso por APROBADO; vacío no ve nada. En
+// TestVisible: cliente en el conjunto; vacío no ve nada. En
 // un préstamo la unidad no cuenta: decide el cliente del viaje (DEC-149 #5).
 func TestVisible(t *testing.T) {
 	a, b := uuid.New(), uuid.New()
-	viajeA := Hechos{ClienteID: a, Estado: "EN_TRANSITO"}
+	viajeA := Hechos{ClienteID: a}
 	casos := []struct {
 		nombre   string
 		clientes []uuid.UUID
@@ -62,11 +46,6 @@ func TestVisible(t *testing.T) {
 		{"préstamo: unidad de B en viaje de A, monitorista de B", []uuid.UUID{b}, viajeA, false},
 		{"sin alcance (nil)", nil, viajeA, false},
 		{"sin alcance (vacío)", []uuid.UUID{}, viajeA, false},
-		{"SOLICITADO de su cliente", []uuid.UUID{a}, Hechos{ClienteID: a, Estado: "SOLICITADO"}, false},
-		{"RECHAZADO_POR_AI27 de su cliente", []uuid.UUID{a}, Hechos{ClienteID: a, Estado: "RECHAZADO_POR_AI27"}, false},
-		{"cancelado desde SOLICITADO", []uuid.UUID{a}, Hechos{ClienteID: a, Estado: "CANCELADO", CanceladoDesdeSolicitado: true}, false},
-		{"cancelado tras APROBADO", []uuid.UUID{a}, Hechos{ClienteID: a, Estado: "CANCELADO"}, true},
-		{"APROBADO sin escolta", []uuid.UUID{a}, Hechos{ClienteID: a, Estado: "APROBADO"}, true},
 	}
 	for _, c := range casos {
 		if got := Visible(c.clientes, c.h); got != c.quiere {

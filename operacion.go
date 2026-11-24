@@ -46,6 +46,7 @@ import (
 	"github.com/AI27-Tech/pf-svc-operacion/internal/consumidores"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/descargas"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/roster"
+	"github.com/AI27-Tech/pf-svc-operacion/internal/solicitudes"
 	"github.com/AI27-Tech/pf-svc-operacion/internal/viajes"
 	"github.com/google/uuid"
 )
@@ -55,10 +56,14 @@ import (
 // aunque los módulos compartan proceso y transacción (I1).
 type Pools struct {
 	Viajes     *pgxpool.Pool // rol op_viajes
-	Asignacion *pgxpool.Pool // rol op_asignacion (la única excepción de GRANT cruzado)
+	Asignacion *pgxpool.Pool // rol op_asignacion (excepción de GRANT cruzado, ADR 31/35)
 	Bitacora   *pgxpool.Pool // rol op_bitacora
 	Auditoria  *pgxpool.Pool // rol op_auditoria
 	Roster     *pgxpool.Pool // rol op_roster (roster de unidades, ADR 33)
+	// Solicitudes es el pool del rol op_solicitudes (módulo `solicitudes`, ADR 38 y
+	// 39), con search_path=solicitudes para que el publicador resuelva su outbox.
+	// Opcional: sin él no se monta ninguna ruta de solicitudes.
+	Solicitudes *pgxpool.Pool
 }
 
 // Deps agrupa los puertos de salida ya resueltos por la raíz.
@@ -86,8 +91,9 @@ type Deps struct {
 	// o el stub de desarrollo).
 	Verificador auth.Authenticator
 	// BusPublisher es el publicador del bus que usa el Relay de outbox para
-	// drenar los eventos viaje.* del esquema `viajes` (ADR 35, el único outbox de
-	// operacion). Agnóstico al transporte (bus/memory en desarrollo; broker en
+	// drenar los eventos viaje.* del esquema `viajes` (ADR 35) y los solicitud.* del
+	// esquema `solicitudes` (outbox propio, ADR 35 solo unifica viaje.*).
+	// Agnóstico al transporte (bus/memory en desarrollo; broker en
 	// espera de ADR 32). Si es nil, Workers() no arranca el relay: el módulo
 	// escribe eventos a la tabla pero no los publica (arranque standalone sin bus).
 	BusPublisher bus.Publisher
@@ -120,6 +126,15 @@ type Module struct {
 	adjuntos   *adjuntos.Servicio
 	descargas  *descargas.Servicio
 	roster     *roster.Servicio
+	// solicitudes son los casos de uso de la solicitud (E10). nil sin
+	// Pools.Solicitudes.
+	solicitudes *solicitudes.Servicio
+	// relaySolicitudes drena solicitudes.outbox (solicitud.*). nil sin pool o sin
+	// Deps.BusPublisher.
+	relaySolicitudes worker.Worker
+	// vencimiento cierra en VENCIDA las cotizaciones sin pago cuya vigencia
+	// terminó (E10-T7). nil sin Pools.Solicitudes; no necesita bus.
+	vencimiento worker.Worker
 	// auditoriaConsulta lee la bitácora probatoria para la composición del
 	// expediente de descarga (E6-T3). Solo lectura, con el rol op_auditoria.
 	auditoriaConsulta *auditoria.ServicioConsulta
@@ -186,12 +201,22 @@ func New(p Pools, d Deps) (*Module, error) {
 		// Proyección de alcance en el esquema viajes, con op_viajes (DEC-149).
 		alcance: alcance.NuevaProyeccion(p.Viajes),
 	}
-	// El único outbox de operacion es el del esquema `viajes` (ADR 35, DEC-068):
+	// El outbox de la familia viaje.* es el del esquema `viajes` (ADR 35, DEC-068):
 	// lleva todos los eventos viaje.* (incluidos los que asignacion escribe ahí
-	// por la excepción de GRANT). Un solo relay sobre el pool op_viajes lo drena.
+	// por la excepción de GRANT). Un relay sobre el pool op_viajes lo drena; el
+	// módulo solicitudes tiene su propio outbox y su propio relay (más abajo).
 	// Corre con search_path=viajes, igual que el Publisher que ya lo escribe.
 	if d.BusPublisher != nil {
 		m.relay = outbox.NewRelay("outbox-relay:viajes", p.Viajes, d.BusPublisher, outbox.RelayOpciones{})
+	}
+	// Módulo solicitudes: su propio outbox y su propio relay, con su pool (rol
+	// op_solicitudes); ningún worker cruza esquemas (operacion.md (g)).
+	if p.Solicitudes != nil {
+		m.solicitudes = solicitudes.NewServicio(p.Solicitudes, pub)
+		m.vencimiento = solicitudes.NuevoWorkerVencimiento(m.solicitudes, 0)
+		if d.BusPublisher != nil {
+			m.relaySolicitudes = outbox.NewRelay("outbox-relay:solicitudes", p.Solicitudes, d.BusPublisher, outbox.RelayOpciones{})
+		}
 	}
 	// Proyección de tombstones y su consumidor (ADR 26 §3): solo con Broadcaster.
 	// operacion es dueño de su proyección para que el middleware (Routes) y el
@@ -351,6 +376,7 @@ func (m *Module) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/viajes/{id}/incidencias", protegido(m.enAlcance(alcance.Subrecurso, m.handleListarIncidencias)))
 	mux.Handle("GET /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleObtenerFicha)))
 	mux.Handle("PATCH /api/v1/viajes/{id}/ficha", protegido(m.enAlcance(alcance.Subrecurso, m.handleGuardarFicha)))
+	m.rutasSolicitudes(mux, protegido)
 }
 
 // handleObtenerFicha atiende GET /api/v1/viajes/{id}/ficha.
@@ -1056,6 +1082,12 @@ func (m *Module) Workers() []worker.Worker {
 	if m.relay != nil {
 		ws = append(ws, m.relay)
 	}
+	if m.relaySolicitudes != nil {
+		ws = append(ws, m.relaySolicitudes)
+	}
+	if m.vencimiento != nil {
+		ws = append(ws, m.vencimiento)
+	}
 	if m.consumidor != nil {
 		ws = append(ws, m.consumidor)
 	}
@@ -1155,6 +1187,25 @@ type ConsultasAPI interface {
 	// `"tracto": null` a &Tracto{} antes de llamar.
 	ObtenerFicha(ctx context.Context, id operclient.Id) (*operclient.FichaTecnica, error)
 	GuardarFicha(ctx context.Context, id operclient.Id, body operclient.FichaTecnicaEntrada) (*operclient.FichaTecnica, error)
+	// Solicitudes (V2, ADR 38 y 39, DEC-148): los mismos 12 métodos y firmas que
+	// declara bff.OperacionPort; mismos casos de uso que las rutas HTTP (I3). El
+	// actor sale de los claims del ctx. Errores de dominio con el `codigo` del
+	// contrato: transicion_no_permitida, fecha_pago_fuera_de_vigencia,
+	// fecha_hora_servicio_requerida, y fecha_hora_servicio_pasada (aprobar; pendiente de
+	// documentar en el contrato). Para el jefe operativo `cotizacion` y `pago` nulos
+	// significan ocultos (DEC-148 #67), no "sin cotizar". 503 si la raíz no inyectó el pool de op_solicitudes.
+	CrearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error)
+	ListarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error)
+	ObtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error)
+	ListarHistoricoSolicitud(ctx context.Context, id operclient.Id) (*operclient.HistoricoSolicitud, error)
+	CotizarSolicitud(ctx context.Context, id operclient.Id, body operclient.CotizacionEntrada) (*operclient.Solicitud, error)
+	ReprogramarSolicitud(ctx context.Context, id operclient.Id, body operclient.ReprogramacionEntrada) (*operclient.Solicitud, error)
+	RechazarCotizacion(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error)
+	CancelarSolicitud(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error)
+	ConfirmarPago(ctx context.Context, id operclient.Id, body operclient.PagoEntrada) (*operclient.Solicitud, error)
+	RevertirPago(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error)
+	AprobarSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error)
+	RechazarSolicitud(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error)
 }
 
 type consultas struct {
@@ -1162,20 +1213,18 @@ type consultas struct {
 }
 
 func (c *consultas) CrearViaje(ctx context.Context, body operclient.CrearViajeEntrada) (*operclient.Viaje, error) {
-	// El estado inicial lo fija el rol del creador (DEC-026). Para un cliente, el
-	// cliente_id del viaje se deriva de su tenant (DEC-112: tenant == cliente_id),
-	// no del cuerpo. Rol y tenant viajan en los claims del token, que el
-	// middleware inyecta en el ctx (en core, vía bff).
+	// Solo Operación crea viajes, siempre en APROBADO (ADR 38); el rol viaja en
+	// los claims del token, que el middleware inyecta en el ctx (en core, vía bff).
 	claims := auth.ClaimsFromContext(ctx)
 	if claims == nil {
 		return nil, platformerrors.NewNoAutorizado("operacion: crearViaje sin claims en el contexto")
 	}
-	return c.m.viajes.Crear(ctx, body, claims.Rol, claims.TenantID)
+	return c.m.viajes.Crear(ctx, body, claims.Rol)
 }
 
 // ListarViajes acota la lista al alcance del llamante (DEC-149): Cliente, su
 // tenant; jefe_operativo y administrador, todos; monitoreo, sus clientes
-// efectivos desde APROBADO (filtro en la consulta, no en memoria: el cursor
+// efectivos (filtro en la consulta, no en memoria: el cursor
 // sigue siendo correcto); ejecutivo, reaccion y un rol desconocido, 403. Sin
 // claims (llamada de sistema en core) no se acota.
 func (c *consultas) ListarViajes(ctx context.Context, params operclient.ListarViajesParams) (*operclient.PaginaViajes, error) {
@@ -1451,4 +1500,91 @@ func (c *consultas) GuardarFicha(ctx context.Context, id operclient.Id, body ope
 		return nil, err
 	}
 	return c.m.guardarFicha(ctx, id, body)
+}
+
+// Fachada en proceso de las solicitudes: cada método comprueba que el módulo esté
+// habilitado y delega en la misma fachada que usa la ruta HTTP (I3).
+
+func (c *consultas) CrearSolicitud(ctx context.Context, body operclient.CrearSolicitudEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.crearSolicitud(ctx, body)
+}
+
+func (c *consultas) ListarSolicitudes(ctx context.Context, params operclient.ListarSolicitudesParams) (*operclient.PaginaSolicitudes, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.listarSolicitudes(ctx, params)
+}
+
+func (c *consultas) ObtenerSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.obtenerSolicitud(ctx, id)
+}
+
+func (c *consultas) ListarHistoricoSolicitud(ctx context.Context, id operclient.Id) (*operclient.HistoricoSolicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.listarHistoricoSolicitud(ctx, id)
+}
+
+func (c *consultas) CotizarSolicitud(ctx context.Context, id operclient.Id, body operclient.CotizacionEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.cotizarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) ReprogramarSolicitud(ctx context.Context, id operclient.Id, body operclient.ReprogramacionEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.reprogramarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) RechazarCotizacion(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.rechazarCotizacion(ctx, id, body)
+}
+
+func (c *consultas) CancelarSolicitud(ctx context.Context, id operclient.Id, body operclient.AccionClienteEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.cancelarSolicitud(ctx, id, body)
+}
+
+func (c *consultas) ConfirmarPago(ctx context.Context, id operclient.Id, body operclient.PagoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.confirmarPago(ctx, id, body)
+}
+
+func (c *consultas) RevertirPago(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.revertirPago(ctx, id, body)
+}
+
+func (c *consultas) AprobarSolicitud(ctx context.Context, id operclient.Id) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.aprobarSolicitud(ctx, id)
+}
+
+func (c *consultas) RechazarSolicitud(ctx context.Context, id operclient.Id, body operclient.MotivoEntrada) (*operclient.Solicitud, error) {
+	if err := c.m.solicitudesHabilitadas(); err != nil {
+		return nil, err
+	}
+	return c.m.rechazarSolicitud(ctx, id, body)
 }
