@@ -1,10 +1,9 @@
 -- 0001_init.sql — esquema asignacion y rol op_asignacion.
--- Aquí vive la ÚNICA excepción de GRANT cruzado del sistema entero
--- (operacion.md (e), §7.1): op_asignacion recibe USAGE sobre los cuatro
+-- Aquí vive la PRIMERA de las dos excepciones de GRANT cruzado del sistema
+-- (operacion.md (e), §7.1; la segunda es op_solicitudes, ADR 39): op_asignacion recibe USAGE sobre los cuatro
 -- esquemas de operacion, porque la asignación muta la reserva, el estado del
 -- viaje y la auditoría en UNA sola transacción (ADR 31, invariantes; P2).
--- Ningún otro rol de ningún otro servicio puede introducir otra excepción sin
--- un ADR. op_asignacion NUNCA recibe USAGE sobre catalogos: el acceso cruzado a
+-- Ningún otro rol de ningún otro servicio puede introducir una tercera sin un ADR. op_asignacion NUNCA recibe USAGE sobre catalogos: el acceso cruzado a
 -- catalogos falla en la base; la aptitud se consulta por el puerto, no por SQL.
 
 CREATE SCHEMA IF NOT EXISTS asignacion;

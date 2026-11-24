@@ -11,8 +11,9 @@
 -- (viajes), su detalle y el evento viaje.condicion_abierta (viajes.outbox) en UNA
 -- sola transacción. El detalle narrativo de bitacora.incidencia pertenece al rol
 -- op_bitacora; op_viajes no tiene GRANT sobre bitacora y op_bitacora no lo tiene
--- sobre viajes. Escribir ambos esquemas en una tx exigiría una SEGUNDA excepción
--- de GRANT cruzado (hoy solo existe la de op_asignacion), lo que requiere ADR
+-- sobre viajes. Escribir ambos esquemas en una tx exigiría una TERCERA excepción
+-- de GRANT cruzado (hoy hay dos: op_asignacion, ADR 31/33/35, y op_solicitudes,
+-- ADR 39), lo que requiere ADR
 -- (operacion.md §(e), ADR 18 §4). Por eso el caso de uso vive íntegro en el
 -- módulo viajes y guarda el detalle en el mismo esquema. bitacora.incidencia
 -- queda para el camino V2 disparado por telemetría (denormaliza lat/lon, §C.5),

@@ -60,16 +60,16 @@ func prepara(t *testing.T, ctx context.Context) *descargas.Servicio {
 
 // sembrarViaje inserta un viaje directamente (la creación vive en el paquete
 // viajes; aquí solo se necesita un viaje que descargar). Devuelve su id.
-func sembrarViaje(t *testing.T, ctx context.Context) operclient.Id {
+func sembrarViaje(t *testing.T, ctx context.Context, nacioDeSolicitud bool) operclient.Id {
 	t.Helper()
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
 	id := uuid.New()
 	dbtest.Exec(t, ctx, admin, "SET search_path TO viajes")
 	if _, err := admin.Exec(ctx,
-		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, creado_en)
-		 VALUES ($1, 'EN_TRANSITO', $2, 'Origen', $3, now())`,
-		id, uuid.New(), time.Now().Add(24*time.Hour).UTC(),
+		`INSERT INTO viajes.viaje (id, estado, cliente_id, origen, fecha_hora_servicio, creado_en, nacio_de_solicitud)
+		 VALUES ($1, 'EN_TRANSITO', $2, 'Origen', $3, now(), $4)`,
+		id, uuid.New(), time.Now().Add(24*time.Hour).UTC(), nacioDeSolicitud,
 	); err != nil {
 		t.Fatalf("sembrar viaje: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestRegistrarDescargaEscribeUnRegistro(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	viajeID := sembrarViaje(t, ctx)
+	viajeID := sembrarViaje(t, ctx, false)
 	const actor = "usuario-123"
 
 	antes := time.Now().UTC()
@@ -149,6 +149,23 @@ func TestRegistrarDescargaEscribeUnRegistro(t *testing.T) {
 	}
 }
 
+// TestRegistrarDescargaDevuelvePenalizacion — el Viaje descargado lleva
+// cancelacion_con_penalizacion como las demás rutas (DEC-148 #14): true si el
+// viaje nació de una solicitud pagada, false si no.
+func TestRegistrarDescargaDevuelvePenalizacion(t *testing.T) {
+	ctx := context.Background()
+	svc := prepara(t, ctx)
+	for _, nacio := range []bool{true, false} {
+		v, err := svc.Registrar(ctx, sembrarViaje(t, ctx, nacio), "usuario-123")
+		if err != nil {
+			t.Fatalf("Registrar (nacio_de_solicitud=%v): %v", nacio, err)
+		}
+		if v.CancelacionConPenalizacion == nil || *v.CancelacionConPenalizacion != nacio {
+			t.Errorf("cancelacion_con_penalizacion: got %v, want %v", v.CancelacionConPenalizacion, nacio)
+		}
+	}
+}
+
 // TestRegistrarDescargaViajeInexistente — descargar un expediente que no existe
 // da NoEncontrado y NO escribe ningún registro: no se audita la descarga de algo
 // inexistente.
@@ -173,7 +190,7 @@ func TestRegistroDescargaEsAppendOnly(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
 
-	viajeID := sembrarViaje(t, ctx)
+	viajeID := sembrarViaje(t, ctx, false)
 	if _, err := svc.Registrar(ctx, viajeID, "usuario-123"); err != nil {
 		t.Fatalf("Registrar: %v", err)
 	}

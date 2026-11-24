@@ -1,5 +1,223 @@
 # CHANGELOG
 
+## 2026-11-25 10:00 — `solicitudes`: el jefe operativo no ve el motivo de `pago_revertido` (DEC-148 #73, revisión de #111)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Sin ola de contrato.
+
+**Cambios:**
+- **#73, histórico:** para quien no `veComercial` (el `jefe_operativo`), la entrada `pago_revertido` sale con `motivo` nulo (lo escribe el administrador y puede nombrar montos o referencias). El `motivo` de `reprogramada` se muestra. `recotizada`, `pago_confirmado` y `pago_revertido` siguen apareciendo, sin monto, notas, referencia ni objeto `cotizacion`. Cubre `Historico` y `ListarHistoricoSolicitud` (misma fachada). `cotizacion`, `administrador` y el cliente conservan lo que veían; el cliente no tiene histórico (403) y solo ve `motivo_rechazo`. Ningún otro camino del jefe reproduce ese motivo: el detalle, el listado y las respuestas de aprobar y rechazar no leen la tabla de transiciones salvo `motivo_rechazo` (solo en `RECHAZADO_POR_AI27`, escrito por el propio jefe); los avisos y los errores no incluyen motivos.
+- Aclaración: para el jefe, `cotizacion: null` y `pago: null` significan **oculto**, no "sin cotizar" (el contrato dice "null mientras no se ha cotizado"; una solicitud `PAGADO` siempre tiene ambos). Comentarios de `armar`, `Historico` y `ConsultasAPI`.
+- Pruebas: la tabla rol × campo cubre el motivo de `pago_revertido` (con un monto y una referencia) y el de `reprogramada`; el cliente ve el motivo como antes; el 404/409 de permiso y estado de `Aprobar` gana a `fecha_hora_servicio_pasada`; lista de permitidos de `veComercial`. Las pruebas del histórico ya no fallan por `nil pointer`, sino por aserción.
+- **Pendiente para la próxima ola de contrato (no se tocó el contrato):** documentar `fecha_hora_servicio_pasada` en `aprobarSolicitud` (`operacion.yaml`, `bff.yaml`), el 409 de `confirmarPago` por un segundo pago tardío (`transicion_no_permitida`) y la nota del `null` del jefe.
+
+**Archivos:** `internal/solicitudes/{historico,servicio}.go`, `operacion.go` (comentarios), `internal/solicitudes/seguimiento_test.go`, `consultas_solicitudes_integration_test.go`, `CHANGELOG.md`.
+
+## 2026-11-24 20:00 — `solicitudes`: el jefe operativo sin lo comercial, aprobar con fecha pasada y `viaje_id` en la auditoría de `aprobada` (DEC-148 #67 a #71)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Sin ola de contrato: `cotizacion` y `pago` ya son opcionales (nulos) en tracer.45.
+
+**Cambios:**
+- **#67, el jefe operativo no ve nada comercial:** para ese rol, `cotizacion` y `pago` salen `null` en el detalle, el listado, las respuestas de aprobar y rechazar y los métodos de `ConsultasAPI` (misma fachada). La consulta tampoco lee monto, moneda, notas ni `pago_solicitud` para él. En el histórico conserva todas las acciones, estados y actores, pero ningún objeto `cotizacion` ni el `motivo` de `pago_revertido` (ver el seguimiento de abajo) (la lectura de versiones solo trae versión, entrega, vigencia y actor). `cotizacion`, `administrador` y el cliente conservan lo que ya veían. `Actor.veComercial` es una lista de permitidos.
+- **#68, aprobar con la fecha del servicio pasada:** `Aprobar` responde 409 `fecha_hora_servicio_pasada` si esa fecha no es posterior al instante actual del reloj (igual al instante actual también se rechaza, como `exigeFutura`); la solicitud no cambia. El contrato tracer.45 no documenta ese código (ver PR).
+- **#70, auditoría de `aprobada` ligada al viaje:** su fila lleva `viaje_id` (el id de la solicitud) y se escribe después de crear el viaje, dentro del interceptor y de la misma transacción (`Cambio.Tras`). Las demás acciones siguen con `viaje_id` nulo y el id en `detalle`. No hay FK en `registro_auditoria.viaje_id`; el orden lo fija una prueba con un trigger.
+- #69 y #71 solo confirman lo implementado: se quitó el `TODO(producto)` de `cotizacion_nueva` y se citan las decisiones en los comentarios.
+- Pruebas: tabla rol × campo comercial en detalle, listado e histórico; la consulta del jefe no lee lo comercial (con control); aprobar y rechazar del jefe; aprobar en el límite (un segundo antes, mismo instante, un segundo después, en UTC y en Ciudad de México); `viaje_id` solo en `aprobada` y después del viaje; tabla equivalente por `ConsultasAPI`. `TestAprobarCreaElViaje` ahora exige `viaje_id` en lugar de nulo.
+
+**Archivos:** `internal/solicitudes/{servicio,lectura,historico,aprobar,maquina}.go`, `internal/solicitudes/{aprobar_test,seguimiento_test}.go` (nuevo el segundo), `consultas_solicitudes_integration_test.go`, `CHANGELOG.md`.
+
+## 2026-11-24 18:00 — `solicitudes`: auditoría de cada acción, histórico unificado y los 12 métodos de `ConsultasAPI` (E10-T11, DEC-148 #42)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Ruta nueva `GET /api/v1/solicitudes/{id}/historico`; `ConsultasAPI` gana 12 métodos (firmas de `COSTURAS.md` §2); migración `solicitudes/0007_creado_por.sql`.
+
+**Cambios:**
+- **Auditoría** (`auditoria.registro_auditoria`, módulo `solicitudes`, misma transacción que la acción, con el interceptor): `creada`, `recotizada`, `reprogramada` y `fecha_cambiada_en_cotizacion` (cuando la cotización cambia la fecha del cliente o de la versión anterior, con fecha anterior y nueva) se suman a las transiciones, que ya audita `transicionar`. Si la auditoría falla, la acción revierte entera. Sin datos comerciales en el detalle. `viaje_id` queda NULL.
+- `0007_creado_por.sql`: `solicitud.creado_por` (el `sub` de quien creó) para que el histórico tenga el actor de `creada`; `op_solicitudes` no lee `auditoria`. Sin `GRANT` nuevo: la columna no es actualizable. La `0006` es de #106.
+- `historico.go`: `Historico` une la solicitud, `transicion_solicitud`, las versiones de la cotización y las reprogramaciones en orden cronológico (empates: creada, transición, recotizada, reprogramada). La primera cotización va en `cotizada`; las siguientes, en `recotizada`, con la versión completa. Solo `cotizacion`, `administrador` y el jefe operativo en `PAGADO`; el cliente y los demás, 403; solicitud inexistente o que el jefe ya no ve, 404. Se conserva tras aprobarse. Un `sub` que no sea UUID sale como `actor_id` null (el contrato lo tipa como `Id`).
+- `operacion.go`, `solicitudes.go`, `facultades.go`: los 12 métodos de `ConsultasAPI` (`CrearSolicitud`, `ListarSolicitudes`, `ObtenerSolicitud`, `ListarHistoricoSolicitud`, `CotizarSolicitud`, `ReprogramarSolicitud`, `RechazarCotizacion`, `CancelarSolicitud`, `ConfirmarPago`, `RevertirPago`, `AprobarSolicitud`, `RechazarSolicitud`) sobre la misma fachada que las rutas (I3); 503 si falta el pool de `op_solicitudes`.
+- Pruebas: una fila de auditoría por acción en orden y con actor; falla de auditoría revierte cada acción (siete); inmutabilidad por permisos (histórico, cotizaciones, reprogramaciones, auditoría y viajes); histórico completo y su consistencia con la auditoría; el ciclo completo por los 12 métodos de la fachada.
+
+## 2026-11-24 15:00 — `solicitudes`: permisos por rol, listado, detalle y avisos (E10-T9, E10-T10, DEC-148 #20, #22, #53 a #57)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Rutas nuevas `GET /api/v1/solicitudes` y `GET /api/v1/solicitudes/{id}`.
+
+**Cambios:**
+- `lectura.go`: `Listar` y `Obtener`. Cliente: las de su organización. `cotizacion` y `administrador`: todas, en cualquier estado. `jefe_operativo`: exactamente las `PAGADO` (su bandeja). Monitorista, supervisor, coordinador, ejecutivo y reacción: `403` en el listado y por id, decidido por el rol antes de tocar la base. Lo que el actor no ve (otra organización; el jefe fuera de `PAGADO`) responde `404`, igual que lo que no existe. Orden de la más nueva a la más antigua, páginas de 50, cursor keyset `(creado_en, id)`, `estado` filtra (400 si no existe).
+- Avisos derivados del estado y la hora, no almacenados: `nueva` (SOLICITADO, a `cotizacion` y `administrador`), `por_vencer` (COTIZADO, desde las 00:00 de `America/Mexico_City` del último día − 3, a `cotizacion`, `administrador` y cliente), `cancelacion_con_penalizacion` (a `cotizacion`/`administrador`), `cotizacion_nueva` y `rechazo_de_ai27` (al cliente). Nada para el jefe operativo; nada por pago ni aprobación (#56).
+- `Actor.puedeVer` es la regla única de visibilidad; `aprobar.go` la usa en lugar de su guarda propia.
+- `armar` es método de `Servicio` (recibe al actor para los avisos) y tolera un rechazo sin fila de histórico.
+- `facultades.go` y `solicitudes.go`: `listarSolicitudes` y `obtenerSolicitud`.
+- Pruebas: alcance por rol en listado y por id, paginación con empates, fronteras de "por vencer" con reloj, avisos por rol, misma fila antes y después de aprobar, cotización vigente, y la tabla rol × acción completa (9 roles × 11 acciones) por HTTP.
+- **Pendiente de este tramo:** los 12 métodos nuevos de `ConsultasAPI` y el histórico (`ListarHistoricoSolicitud`) llegan con E10-T11.
+
+## 2026-11-24 13:00 — `solicitudes`: pruebas de la forma de `viaje.*` y del `search_path` al aprobar (revisión de #108)
+
+**Para quién:** quien mantiene `operacion`, `reportes` y `mensajeria`. Sin cambio de comportamiento.
+
+**Cambios:**
+- `aprobar_test.go`: `TestAprobarPublicaLaFormaDeViajesCrear` fija clave por clave el payload, `Version`, `agregado_id` y `ocurrido_en` de `viaje.creado` y `viaje.mensajeria_habilitada` con valores escritos a mano, los mismos que emite `viajes.Crear` (`reportes` lee `creado_en`; `mensajeria`, `viaje_id` y `cliente_id`). `TestPublicarEnViajesRestauraElSearchPath` afirma que un evento publicado después en la misma transacción va a `solicitudes.outbox` y no a `viajes.outbox`.
+- `aprobar.go`: solo comentarios. `TODO(producto)` de aprobar con la fecha del servicio ya pasada (DEC-148 #66 no lo cubre), `TODO(arquitectura)` del bloqueo antes de la guarda de visibilidad, y la fragilidad del `search_path` apuntando a su prueba.
+
+## 2026-11-24 12:00 — `solicitudes`: aprobar y rechazar, con el viaje creado en la misma transacción (E10-T8, ADR 39, DEC-148 #3, #52, #58)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Cambia comportamiento: rutas nuevas `POST /api/v1/solicitudes/{id}/aprobacion` y `/rechazo`; toda transición de la solicitud queda auditada.
+
+**Cambios:**
+- `aprobar.go`: `Aprobar` pasa `PAGADO → APROBADO` y, en la MISMA transacción, inserta el viaje en `APROBADO` con el id de la solicitud (`nacio_de_solicitud = true`, tracto copiado), sus destinos en `viajes.destino` y `viaje.creado` + `viaje.mensajeria_habilitada` en `viajes.outbox` (ADR 35; misma forma que `viajes.Crear`). Con el pool de `op_solicitudes`, que tiene `search_path=solicitudes`: el publicador de la plataforma resuelve `outbox` por `search_path`, así que se apunta a `viajes` solo dentro de la transacción (`set_config` local) y se restaura.
+- **GRANT:** no hizo falta `SELECT` en `viajes.viaje` (el `INSERT` sin `RETURNING` ni `ON CONFLICT` no lo pide) ni `INSERT` en `viajes.transicion_viaje` (el viaje que crea Operación tampoco la escribe, DEC-148 #58). No hay migraciones nuevas. La prueba de integración lo demuestra con el rol real.
+- `Rechazar`: `PAGADO → RECHAZADO_POR_AI27`, motivo obligatorio, sin marca ni viaje; `Solicitud.motivo_rechazo` ya se llena (el cliente lo ve, #55).
+- Guardas: el jefe operativo no ve fuera de `PAGADO` (404, también en la carrera perdida); el administrador recibe `409 transicion_no_permitida`; sin fecha y hora, `409 fecha_hora_servicio_requerida`.
+- `maquina.go`: `transicionar` escribe ahora la auditoría (`auditoria.registro_auditoria`, módulo `solicitudes`) con el interceptor, en la misma transacción. `viaje_id` queda en NULL y el id de la solicitud va en `detalle`: el expediente del viaje no debe mostrar acciones comerciales de la etapa de cotización. Sin datos comerciales en el detalle.
+- `facultades.go` y `solicitudes.go`: facultad `jefe_operativo` y `administrador` y las dos rutas.
+- Pruebas: viaje, destinos, eventos y auditoría con valores a mano; guardas por estado y rol; atomicidad con falla inyectada en seis puntos (incluido el commit); carreras aprobar/aprobar, aprobar/rechazar y aprobar/cancelar; facultad por rol por HTTP.
+
+## 2026-11-24 12:00 — `solicitudes`: el vencimiento ya no cierra una solicitud recién recotizada (E10-T7, revisión de #107)
+
+**Para quién:** quien mantiene `operacion`. Corrige un defecto: una solicitud recotizada justo cuando el worker la tomaba podía quedar `VENCIDA` con una cotización vigente recién entregada (recuperable por la vía de `VENCIDA → PAGADO`, #64).
+
+**Cambios:**
+- `vencimiento.go`: `vencer` repite la condición (estado `COTIZADO` y vigencia de la última versión terminada) con una consulta nueva DESPUÉS de tomar el bloqueo. La sentencia que bloquea evalúa la vigencia con la instantánea de su inicio, y una recotización sin cambio de fecha no actualiza la fila de `solicitud`, así que Postgres no la reevaluaba.
+- Prueba `TestVencerNoCierraUnaSolicitudRecotizadaEnCarrera`: lanza `vencer` y `Cotizar` a la vez sobre 2400 solicitudes; sin el arreglo fallan unas 25, con él ninguna.
+
+## 2026-11-24 09:00 — `solicitudes`: vencimiento automático de la cotización (E10-T7, DEC-148 #15, #50, #63)
+
+**Para quién:** quien mantiene `operacion` y `pf-svc-core`. Cambia comportamiento: `COTIZADO` sin pago pasa solo a `VENCIDA`. `core` debe arrancar `Workers()` (ya lo hace para el relay) para que corra.
+
+**Cambios:**
+- `internal/solicitudes/vencimiento.go`: `VencerVencidas` y `WorkerVencimiento` (`vencimiento:solicitudes`, cada minuto, no necesita bus). Vence cuando el día de hoy en `America/Mexico_City` es posterior al último día de vigencia de la ÚLTIMA versión de la cotización (entrega + 15 días, inclusive): el último día no vence ni a las 23:59:59; a las 00:00:00 del siguiente, sí. Disparador `sistema`, sin actor, sin marca, sin viaje.
+- **Una sola ejecución con varias réplicas:** cada solicitud se cierra en su propia transacción con `SELECT ... FOR UPDATE OF s SKIP LOCKED` repitiendo la condición bajo el bloqueo. Se eligió esto y no un `pg_advisory_lock` global porque no serializa a las réplicas, no deja un lock colgado si una muere y se protege además de un pago en vuelo (la fila bloqueada se salta y gana el pago, #15). Una falla en una solicitud no frena al resto; la siguiente corrida reintenta.
+- La reversa con la vigencia terminada regresa a `COTIZADO` y este worker la cierra en su siguiente corrida (#63). Se quita ese `TODO(producto)`.
+- `maquina.go`: `transicionar` hace `UPDATE ... WHERE estado = <de>` y responde `409 transicion_no_permitida` si no afecta una fila (defensa en profundidad pedida en la revisión de #103).
+- `operacion.go`: `Workers()` incluye el vencimiento cuando hay pool de `op_solicitudes`.
+- Pruebas: frontera con reloj, sin marca ni viaje, pagada/recotizada/idempotencia, reversa, cuatro réplicas, pago en vuelo, falla a mitad de lote con reintento, worker y cableado en el módulo.
+## 2026-11-23 19:00 — `solicitudes`: la base solo admite moneda MXN en la cotización (DEC-148 #62)
+
+**Para quién:** quien mantiene `operacion` y quien aplica migraciones. No cambia el comportamiento del servicio, que ya validaba `MXN`. Una fila con otra moneda hará fallar la migración (no debería existir).
+
+**Cambios:**
+- `migrations/solicitudes/0006_cotizacion_moneda_mxn.sql`: `CHECK (moneda = 'MXN')` en `solicitudes.cotizacion` (constraint `cotizacion_moneda_mxn`), aditiva e idempotente. Es la única tabla con moneda. Sin cambios de GRANT. `0004` no se edita: su comentario de "moneda texto libre / catálogo pendiente" quedó superado y la nota está en `0006`.
+- `internal/solicitudes/integracion_test.go`: `TestCotizacionMonedaSoloMXN` (`USD`, `mxn` y ` MXN ` fallan por el CHECK; `MXN` pasa).
+- Se cierra el pendiente "catálogo de monedas" de la entrada del 2026-11-23 de `E10-T4`: no habrá catálogo.
+
+## 2026-11-23 18:30 — `solicitudes`: el pago tardío ocurre una sola vez y la fecha de pago puede ser futura (DEC-148 #64, #65)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Cambia comportamiento: un segundo `VENCIDA → PAGADO` en la misma solicitud responde `409 transicion_no_permitida`.
+
+**Cambios:**
+- `pago.go`: `ConfirmarPago` consulta el histórico (`transicion_solicitud`, de `VENCIDA` a `PAGADO`) dentro de la transacción y bajo el `FOR UPDATE` de la solicitud. Se lee el histórico y no `pago_solicitud` porque es append-only, lo escribe solo `transicionar` y conserva la arista aunque el pago se revierta. El contrato (tracer.45) solo define `transicion_no_permitida` y `fecha_pago_fuera_de_vigencia` para este 409; se usó el primero. Se quita el `TODO(producto)` de la repetición; el de la reversa con vigencia terminada (#63) sigue.
+- La fecha del pago futura se acepta mientras caiga en la vigencia (#65); el código ya lo permitía, ahora lo fija una prueba.
+- Pruebas (`pago_test.go`): `TestPagoTardioUnaSolaVez` (segundo pago rechazado sin rastro; un pago normal revertido no consume el tardío) y `TestFechaDePagoFutura`.
+
+## 2026-11-23 18:00 — `solicitudes`: moneda única MXN y fecha del servicio futura al cotizar y reprogramar (DEC-148 #62, #66)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: cotizar con otra moneda o con fecha pasada responde `400`; reprogramar a una fecha pasada responde `400`.
+
+**Cambios:**
+- `cotizacion.go`: la única moneda es `MXN`, exacta (`USD`, `mxn` o ` MXN ` se rechazan; ya no se recorta). El monto admite cero y rechaza negativos. `Cotizar` y `Reprogramar` exigen una fecha del servicio posterior al reloj (`exigeFutura`, #103). Se quita el `TODO(producto)` de moneda y monto.
+- Pruebas: `cotizacion_test.go` (monedas, monto cero y negativo, fecha pasada, igual a ahora y un segundo después, también en `Reprogramar`) y `solicitudes_integration_test.go` (la fecha HTTP es relativa a hoy para no caducar).
+- **Contrato:** `CotizacionEntrada.moneda` es `string` libre en tracer.45; la validación vive en `operacion`. Pasarla a enum es una ola aditiva de contrato que el Lead debe decidir (la descripción del contrato advierte que estrechar a enum es incompatible); no se hizo aquí.
+
+## 2026-11-23 17:30 — `solicitudes`: la fecha del servicio al crear debe ser futura (DEC-148 #66)
+
+**Para quién:** quien mantiene `operacion`, `bff` y los frontends. Cambia comportamiento: `Crear` con `fecha_hora_servicio` en el pasado responde `400`.
+
+**Cambios:** `exigeFutura` (`servicio.go`) rechaza una fecha igual o anterior al reloj del servicio; `Crear` la aplica cuando el cliente envía fecha (es opcional). Se compara el instante, que da lo mismo medido en `America/Mexico_City` que en UTC. `TestCrear` usa un reloj fijo y cubre ayer, igual a ahora, un segundo antes, hora en CDMX y un segundo después (se acepta).
+
+## 2026-11-23 11:30 — `solicitudes`: prueba del pago contra la última cotización (revisión de #105)
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento.
+
+**Cambios:** `TestPagoSeValidaContraLaUltimaCotizacion`: tras recotizar, una fecha que solo cabe en la v1 se rechaza y una que solo cabe en la v2 se acepta y el pago apunta a la versión 2; falla si `ConfirmarPago` lee la primera versión. Las mutaciones vivas restantes del informe (`transicionar` sin el dato generado y el motivo de la reversa validado también en `RevertirPago`) quedan vivas por ser redundancias benignas.
+
+## 2026-11-23 10:40 — solicitudes: confirmar el pago, pago tardío y reversa (E10-T6)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Agrega `PUT /api/v1/solicitudes/{id}/pago` y `POST /api/v1/solicitudes/{id}/reversa-pago` (OpenAPI de tracer.45). Se apila sobre E10-T4/T5 (PR #104).
+
+**Resumen:** `cotizacion` y `administrador` confirman el pago (`COTIZADO → PAGADO`); la fecha del pago es obligatoria y debe caer entre el día de entrega de la última cotización y su último día de vigencia, ambos incluidos (`409 fecha_pago_fuera_de_vigencia`); gana la fecha del pago, no la de la confirmación. Desde `VENCIDA` solo se admite la excepción `VENCIDA → PAGADO` con el pago dentro de la vigencia, registrada como `pago_confirmado_tardio`. Solo el `administrador` revierte (`PAGADO → COTIZADO`), con motivo obligatorio; el pago queda marcado como revertido, no borrado.
+
+**Cambios:**
+- `migrations/solicitudes/0005_pago.sql` (nuevo): `pago_solicitud` con un único pago vigente por solicitud (índice único parcial); `UPDATE` solo de `revertido_en`.
+- `internal/solicitudes/pago.go` (nuevo), `servicio.go`: `ConfirmarPago`, `RevertirPago`, y el pago vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades (`confirmarPago`: cotizacion y administrador; `revertirPago`: administrador).
+- Pruebas: `internal/solicitudes/pago_test.go`, `integracion_test.go` (privilegios), `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)`):** qué pasa al revertir cuando la vigencia ya terminó (vence de inmediato o se recotiza) y si `VENCIDA → PAGADO` puede repetirse.
+
+## 2026-11-23 11:15 — `solicitudes`: prueba de la fecha del servicio al cotizar (revisión de #104)
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento.
+
+**Cambios:** `TestCotizarPersisteFechaDelServicio` lee de la base `solicitud.fecha_hora_servicio` tras cotizar y recotizar; falla si `Cotizar` deja de actualizarla (E10-T8 la lee para la guarda de DEC-010 #2 y para el viaje).
+
+## 2026-11-23 10:37 — solicitudes: cotizar, recotizar, reprogramar, rechazar la cotización y cancelar (E10-T4, E10-T5)
+
+**Para quién:** quien mantiene `operacion`, `bff` y el panel/portal. Agrega cuatro rutas del OpenAPI de tracer.45: `PUT /api/v1/solicitudes/{id}/cotizacion`, `PUT .../fecha-hora`, `POST .../rechazo-cotizacion` y `POST .../cancelacion`. Se apila sobre E10-T2/T3 (PR #103).
+
+**Resumen:** `cotizacion` y `administrador` cotizan (`SOLICITADO → COTIZADO`), recotizan (versión nueva, sin cambio de estado, vigencia desde la última entrega) y reprograman una solicitud `PAGADO` con motivo obligatorio. El cliente dueño rechaza la cotización (`COTIZADO → RECHAZADO_POR_CLIENTE`) o cancela (`CANCELADO_POR_CLIENTE`, con marca de penalización solo desde `PAGADO`); una solicitud de otra organización responde 404. La vigencia (15 días, `America/Mexico_City`) se calcula al entregar la cotización para guardar `vigente_hasta`; el vencimiento automático no entra (E10-T7).
+
+**Cambios:**
+- `migrations/solicitudes/0004_cotizacion.sql` (nuevo): `cotizacion` (una fila por versión, solo `INSERT`) y `reprogramacion_solicitud` (solo `INSERT`).
+- `internal/solicitudes/cotizacion.go`, `respuesta.go` (nuevos), `servicio.go`: `Cotizar`, `Reprogramar`, `RechazarCotizacion`, `Cancelar` y la cotización vigente en la respuesta.
+- `solicitudes.go`, `facultades.go`: rutas, fachadas y facultades por rol.
+- Pruebas: `internal/solicitudes/cotizacion_test.go`, `respuesta_test.go`; `solicitudes_integration_test.go` (HTTP por rol).
+
+**Pendiente de producto (`TODO(producto)` en el código):** catálogo de monedas y límites del monto; cómputo exacto del último día de vigencia.
+
+## 2026-11-23 12:00 — `solicitudes`: pruebas del informe de revisión de #103 (concurrencia, metadatos de aristas, relay) y comentarios al día
+
+**Para quién:** quien mantiene `operacion`. No cambia comportamiento: cierra los hallazgos de pruebas y comentarios del informe `semantic-review/2026-11-21-pr-103-105-operacion-solicitudes.md`.
+
+**Cambios:**
+- `TestCarreraCancelarVsPagarSerializa`: 40 carreras cancelar vs pagar sobre la misma solicitud; falla si `cargar` pierde `FOR UPDATE` (verificado con la mutación).
+- `TestMetadatosDeAristasADR38`: disparador, acción, guarda de motivo y marca de las 11 aristas con valores escritos a mano desde el ADR 38 y el OpenAPI, independientes de `aristas`.
+- `TestRelayDeSolicitudesEntregaAlBus`: `solicitud.creada` llega al bus por `outbox-relay:solicitudes` con el pool `op_solicitudes`.
+- Comentarios: ya no dicen que el outbox de `viajes` es el único de `operacion` (`operacion.go`, `internal/asignacion/doc.go`); el comentario DEC-060 #2 de `facultades.go` vuelve a `guardarFicha`.
+
+## 2026-11-23 10:34 — módulo `solicitudes`: máquina de estados y crear la solicitud (E10-T2, E10-T3; ADR 38, DEC-148)
+
+**Para quién:** quien mantiene `operacion`, `bff` y `pf-svc-core`. Agrega la ruta `POST /api/v1/solicitudes` (solo el cliente) y el pool opcional `Pools.Solicitudes`; sin ese pool no se monta nada y el resto del servicio no cambia. `core` debe pasar el pool de `op_solicitudes` con `search_path=solicitudes` (no se toca `pf-svc-core` aquí).
+
+**Resumen:** `solicitudes` es el único dueño de las transiciones de la solicitud: una sola función (`transicionar`) valida contra `estados.PuedeTransicionarSolicitud` (tracer.45), el disparador de la arista y la guarda de motivo, y escribe el estado, su fila en `transicion_solicitud` y el evento `solicitud.estado_cambiado` en la misma transacción. Crear la solicitud nace en `SOLICITADO` con la organización del token y publica `solicitud.creada` por el outbox del esquema `solicitudes` (payload generado del contrato, sin datos comerciales ni marca de penalización).
+
+**Cambios:**
+- `migrations/solicitudes/0003_solicitud.sql` (nuevo): tablas `solicitud` (CHECK del enum de estados y de la marca de penalización), `transicion_solicitud` (solo `INSERT`) y `outbox`; `GRANT` mínimos de `op_solicitudes` (`UPDATE` solo de `estado`, `marca_penalizacion` y `fecha_hora_servicio`).
+- `internal/solicitudes/` (nuevo): `maquina.go` (aristas del ADR 38, `transicionar`, publicación de eventos), `servicio.go` (`Crear`, carga con bloqueo), `doc.go`.
+- `solicitudes.go`, `operacion.go`, `facultades.go` (nuevo/editados): `Pools.Solicitudes`, relay `outbox-relay:solicitudes`, ruta y facultad `crearSolicitud` (solo `cliente`).
+- Pruebas: `internal/solicitudes/maquina_test.go`, `integracion_test.go` (los 64 pares de estados contra Postgres, rechazos, atomicidad con falla inyectada, CHECK, privilegios, creación); `solicitudes_integration_test.go` (HTTP por rol); `consultas_integration_test.go` (el módulo de prueba pasa el pool).
+- `go.mod`: `google.golang.org/protobuf` pasa de indirecta a directa (serializa los eventos).
+
+**Pendiente (otras historias):** las demás acciones (E10-T4 a T6), vencimiento, aprobación, permisos por rol sobre lectura, bandejas, avisos (`avisos` sale vacío) y auditoría histórica (E10-T7 a T11); los métodos de `ConsultasAPI`; el cableado en `pf-svc-core`.
+
+## 2026-11-20 14:50 — esquema `solicitudes`, rol `op_solicitudes` y su excepción de GRANT (E10-T1, ADR 39)
+
+**Para quién:** quien mantiene `operacion` y `pf-svc-core`. No cambia ninguna API: deja listo el esquema donde vivirá el módulo de solicitudes (E10-T2 en adelante) y los privilegios con los que su aprobación creará el viaje en la misma transacción.
+
+**Resumen:** `operacion` pasa a seis esquemas. `op_solicitudes` es dueño de `solicitudes` y es la segunda excepción de GRANT cruzado del sistema: solo `INSERT` en `viajes.viaje`, `viajes.destino`, `viajes.outbox` y `auditoria.registro_auditoria`. Nada de `UPDATE`, `DELETE` ni `SELECT` en `viajes`, y nada sobre `bitacora`, `asignacion`, `roster` ni `catalogos`. El esquema queda sin tablas: el modelo de la solicitud es de E10-T2.
+
+**Cambios:**
+- `migrations/solicitudes/0001_init.sql`, `0002_grants.sql` (nuevos): esquema, rol y partir de cero con `REVOKE`, igual que `viajes/0002_grants.sql`.
+- `migrations/viajes/0008_grants_op_solicitudes.sql`, `migrations/auditoria/0003_grants_op_solicitudes.sql` (nuevos): el tramo de la excepción, otorgado desde el esquema destino, en la fase de grants.
+- `migrations/migrations.go`: `solicitudes` en el embed, en `Orden` (al final) y en `RolPorEsquema`; `core/cmd/migrate` lo recoge solo.
+- `migrations/grants_integration_test.go`: la prueba aplica todas las migraciones (antes solo `0001` y `0002`) y agrega `op_solicitudes`: lo que sí puede y cada negación contra Postgres real, y que ningún otro rol ni `PUBLIC` tiene privilegios sobre `solicitudes`.
+- Revisión del PR #101: las negaciones de `op_solicitudes` se guían por la tabla `permisosOpSolicitudes` (una por tabla de `viajes` y `auditoria`, con SELECT, INSERT, UPDATE y DELETE contra Postgres) y se comprueba que no tenga `CREATE` sobre `viajes` ni `auditoria`; una tabla nueva sin permiso declarado falla la prueba. Los grants no cambian. Enmienda del ADR 39 (DEC-148 #58): `op_solicitudes` recibe `INSERT` en `viajes.destino` (lo que escribe `Crear`) y pierde `transicion_viaje` y su secuencia; se concede solo si E10-T8 la necesita. La migración `0008` se corrigió en su lugar: no estaba en `pf-op-d`/`-q`/`-m`.
+- `internal/viajes/servicio_integration_test.go`, `consultas_integration_test.go`: pre-crean `op_solicitudes` cuando aplican solo las migraciones de `viajes`.
+- Comentarios que decían "única excepción de GRANT cruzado": `migrations/viajes/0002_grants.sql`, `0004_incidencia_estadia.sql`, `migrations/asignacion/0001_init.sql`, `migrations/auditoria/0001_init.sql`, `internal/asignacion/{doc,servicio}.go`, `internal/descargas/servicio.go`, `operacion.go`, `README.md`.
+
+## 2026-11-20 14:10 — el viaje de V2: nace en APROBADO y la solicitud sale del viaje (tracer.45, ADR 38)
+
+**Para quién:** el panel interno y el portal del cliente (vía `bff` y `pf-svc-core`). Para quien mantiene el servicio: el viaje pierde cuatro estados, el cliente deja de crear viajes y se borra la regla de alcance que filtraba por haber pasado por `APROBADO`.
+
+**Resumen:** sube el pin a `v0.1.0-tracer.45`. El viaje siempre nace en `APROBADO` y solo lo crea Operación (`jefe_operativo`, `administrador`); el cliente recibe `403`. El cliente solo puede llevar su viaje a `CANCELADO_POR_CLIENTE` (ya no rechaza la escolta, DEC-148 #14). `Viaje.cancelacion_con_penalizacion` sale de la nueva columna `nacio_de_solicitud` (DEC-148 #14, #27); en esta ola ningún camino la pone en `true`, la pondrá la aprobación de la solicitud (E10-T8).
+
+**Cambios:**
+- `go.mod`, `go.sum`: pin a `v0.1.0-tracer.45`. Retirados `SOLICITADO`, `RECHAZADO_POR_AI27`, `RECHAZADO_POR_CLIENTE` y `CANCELADO` (renombrado a `CANCELADO_POR_CLIENTE`).
+- `migrations/viajes/0007_estados_v2.sql` (nuevo, idempotente): reemplaza el `CHECK estado_token_valido` por los 10 estados solo si su definición difiere (no lo suelta en cada arranque) y agrega `nacio_de_solicitud boolean NOT NULL`, sin `DEFAULT` tras rellenar las filas existentes: quien inserte un viaje sin decidir la columna falla. No migra datos: si hay filas con un estado retirado, aborta con un mensaje que nombra cada estado y su conteo (sin `NOT VALID`).
+- `internal/viajes/transicion.go`: el cliente solo va a `CANCELADO_POR_CLIENTE`; se eliminan las guardas de `SOLICITADO → APROBADO` y `→ RECHAZADO_POR_AI27` (y `datosGuarda`). Devuelve `cancelacion_con_penalizacion`.
+- `internal/descargas/servicio.go`: `leerViaje` devuelve `cancelacion_con_penalizacion` como las otras rutas.
+- `internal/viajes/servicio.go`: `Crear` solo para `jefe_operativo` y `administrador` (`roles.Rol*`; otro rol, `403`), siempre en `APROBADO` y con `nacio_de_solicitud = false` explícito; pierde el parámetro `tenant`. Lectura, lista y detalle devuelven `cancelacion_con_penalizacion`. Se elimina la consulta de `SOLICITADO → CANCELADO` de `HechosAlcance`.
+- `internal/alcance/regla.go`: se borran `PasoPorAprobado`, `SQLPasoPorAprobado` y `CanceladoDesdeSolicitado`; `Hechos` queda con `ClienteID`. El monitoreo ve los viajes de sus clientes sin más filtro.
+- `operacion.go`, `facultades.go`, `internal/asignacion/servicio.go`: comentarios y la llamada a `Crear`.
+- Pruebas: `internal/alcance/regla_test.go` (se borra `TestPasoPorAprobado`), `internal/viajes/*_integration_test.go`, `alcance_integration_test.go`, `consultas_integration_test.go`, `internal/asignacion/servicio_integration_test.go`, `migrations/grants_integration_test.go` reescritas sin los estados retirados; casos nuevos: el cliente no crea (403), no rechaza la escolta (403) y la marca de penalización en crear, obtener, listar, transicionar y descargar; 403 de `Crear` para cada rol sin facultad y el positivo de `administrador`; el CHECK de `viaje.estado` coincide con `estados.EstadosViaje`; la columna no tiene `DEFAULT`; la `0007` aborta con estados retirados y se reaplica sin error.
+
 ## 2026-11-18 12:15 — la proyección de alcance se indexa por `idp_subject` (tracer.42, DEC-149 #22)
 
 **Para quién:** el Monitorista, el Supervisor y el Coordinador, que con un IdP real no veían ningún viaje: el token trae el `sub` opaco del IdP y la proyección se indexaba por `sujeto_id` (DEC-072).

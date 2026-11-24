@@ -1,0 +1,199 @@
+package operacion_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	"github.com/AI27-Tech/pf-pkg-platform-go/auth"
+	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
+	"github.com/AI27-Tech/pf-svc-operacion"
+	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
+)
+
+// TestConsultasDeSolicitudesRecorreLosDoceMetodos (I3): los 12 métodos de
+// ConsultasAPI hacen lo mismo que las rutas HTTP, con los claims del ctx como
+// actor, y terminan en el mismo estado. Es el ciclo completo de una solicitud.
+func TestConsultasDeSolicitudesRecorreLosDoceMetodos(t *testing.T) {
+	ctx := context.Background()
+	tenant := uuid.New()
+	m := moduloCompletoCon(t, ctx, operacion.Deps{Verificador: autenticadorRoles{tenant: tenant.String()}, Atomos: catalogo})
+	api := m.Consultas()
+	como := func(rol string) context.Context {
+		c := &auth.Claims{Subject: "00000000-0000-4000-8000-0000000000" + map[string]string{"cliente": "01", "cotizacion": "02", "jefe_operativo": "03", "administrador": "04"}[rol], Rol: rol, Audiencia: auth.AudienciaInterno}
+		if rol == "cliente" {
+			c.Audiencia, c.TenantID = auth.AudienciaCliente, tenant.String()
+		}
+		return auth.ContextWithClaims(ctx, c)
+	}
+	// Motivos a mano: el de la reversa nombra un monto y una referencia y el jefe no lo
+	// ve; el de la reprogramación es operativo y sí (DEC-148 #73).
+	const (
+		motivoReversa = "banco devolvio 100 MXN, ref REF-7 duplicada"
+		motivoReprog  = "el cliente movio la carga un dia"
+	)
+	futuro := time.Now().Add(72 * time.Hour)
+	hoy := openapi_types.Date{Time: time.Now().UTC().Truncate(24 * time.Hour)}
+	estado := func(s *operclient.Solicitud, err error) string {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("falló: %v", err)
+		}
+		return string(s.Estado)
+	}
+
+	s, err := api.CrearSolicitud(como("cliente"), operclient.CrearSolicitudEntrada{Origen: "CDMX", Destinos: []operclient.Destino{{Nombre: "GDL"}}})
+	if got := estado(s, err); got != "SOLICITADO" {
+		t.Fatalf("crear: %s", got)
+	}
+	id := s.Id
+	if got := estado(api.CotizarSolicitud(como("cotizacion"), id, operclient.CotizacionEntrada{Monto: "100", Moneda: "MXN", FechaHoraServicio: futuro})); got != "COTIZADO" {
+		t.Errorf("cotizar: %s", got)
+	}
+	if got := estado(api.ConfirmarPago(como("cotizacion"), id, operclient.PagoEntrada{FechaPago: hoy})); got != "PAGADO" {
+		t.Errorf("confirmar pago: %s", got)
+	}
+	if got := estado(api.ReprogramarSolicitud(como("cotizacion"), id, operclient.ReprogramacionEntrada{FechaHoraServicio: futuro.Add(24 * time.Hour), Motivo: motivoReprog})); got != "PAGADO" {
+		t.Errorf("reprogramar: %s", got)
+	}
+	if got := estado(api.RevertirPago(como("administrador"), id, operclient.MotivoEntrada{Motivo: motivoReversa})); got != "COTIZADO" {
+		t.Errorf("revertir pago: %s", got)
+	}
+	if got := estado(api.ConfirmarPago(como("cotizacion"), id, operclient.PagoEntrada{FechaPago: hoy})); got != "PAGADO" {
+		t.Errorf("confirmar pago otra vez: %s", got)
+	}
+	if p, err := api.ListarSolicitudes(como("jefe_operativo"), operclient.ListarSolicitudesParams{}); err != nil || len(p.Items) != 1 || p.Items[0].Id != id {
+		t.Errorf("bandeja del jefe: %v %+v", err, p)
+	}
+	// DEC-148 #67 por la fachada: el jefe operativo no recibe lo comercial (monto 100 de
+	// la cotización ni el pago); los demás roles que leen, sí.
+	for _, c := range []struct {
+		rol       string
+		comercial bool
+	}{{"cliente", true}, {"cotizacion", true}, {"administrador", true}, {"jefe_operativo", false}} {
+		det, err := api.ObtenerSolicitud(como(c.rol), id)
+		if err != nil {
+			t.Fatalf("obtener como %s: %v", c.rol, err)
+		}
+		lista, err := api.ListarSolicitudes(como(c.rol), operclient.ListarSolicitudesParams{})
+		if err != nil || len(lista.Items) != 1 {
+			t.Fatalf("listar como %s: %v %+v", c.rol, err, lista)
+		}
+		for donde, sol := range map[string]operclient.Solicitud{"detalle": *det, "listado": lista.Items[0]} {
+			if got := sol.Cotizacion != nil && sol.Cotizacion.Monto == "100"; got != c.comercial {
+				t.Errorf("%s de %s: cotización visible = %v, quería %v", donde, c.rol, got, c.comercial)
+			}
+			if got := sol.Pago != nil; got != c.comercial {
+				t.Errorf("%s de %s: pago visible = %v, quería %v", donde, c.rol, got, c.comercial)
+			}
+			if sol.Estado != "PAGADO" || sol.Origen != "CDMX" {
+				t.Errorf("%s de %s perdió lo no comercial: %+v", donde, c.rol, sol)
+			}
+		}
+		if c.rol == "cliente" {
+			continue // el cliente no tiene histórico
+		}
+		hist, err := api.ListarHistoricoSolicitud(como(c.rol), id)
+		if err != nil {
+			t.Fatalf("histórico como %s: %v", c.rol, err)
+		}
+		con := 0
+		for _, it := range hist.Items {
+			if it.Cotizacion != nil {
+				con++
+			}
+			var quiero *string
+			switch it.Accion {
+			case "reprogramada":
+				quiero = ptr(motivoReprog)
+			case "pago_revertido":
+				if c.comercial {
+					quiero = ptr(motivoReversa)
+				}
+			default:
+				continue
+			}
+			if (quiero == nil) != (it.Motivo == nil) || quiero != nil && *quiero != *it.Motivo {
+				t.Errorf("motivo de %s para %s = %v, quería %v", it.Accion, c.rol, it.Motivo, quiero)
+			}
+		}
+		if (con == 1) != c.comercial || (!c.comercial && con != 0) || len(hist.Items) != 6 {
+			t.Errorf("histórico de %s: %d cotizaciones en %d entradas", c.rol, con, len(hist.Items))
+		}
+	}
+	if got := estado(api.AprobarSolicitud(como("jefe_operativo"), id)); got != "APROBADO" {
+		t.Errorf("aprobar: %s", got)
+	}
+	if viajesDe(t, ctx, id) != 1 {
+		t.Error("la aprobación por la fachada no creó el viaje")
+	}
+	if got := estado(api.ObtenerSolicitud(como("cliente"), id)); got != "APROBADO" {
+		t.Errorf("obtener: %s", got)
+	}
+	h, err := api.ListarHistoricoSolicitud(como("administrador"), id)
+	if err != nil {
+		t.Fatalf("histórico: %v", err)
+	}
+	var acciones []string
+	for _, it := range h.Items {
+		acciones = append(acciones, it.Accion)
+	}
+	if want := "[creada cotizada pago_confirmado reprogramada pago_revertido pago_confirmado aprobada]"; fmt.Sprint(acciones) != want {
+		t.Errorf("histórico = %v, quería %s", acciones, want)
+	}
+
+	// Las otras tres salidas del cliente y el rechazo de AI27.
+	nueva := func() uuid.UUID {
+		s, err := api.CrearSolicitud(como("cliente"), operclient.CrearSolicitudEntrada{Origen: "A", Destinos: []operclient.Destino{{Nombre: "B"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Id
+	}
+	cotizar := func(id uuid.UUID) {
+		if _, err := api.CotizarSolicitud(como("cotizacion"), id, operclient.CotizacionEntrada{Monto: "0", Moneda: "MXN", FechaHoraServicio: futuro}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := nueva()
+	cotizar(a)
+	if got := estado(api.RechazarCotizacion(como("cliente"), a, operclient.AccionClienteEntrada{})); got != "RECHAZADO_POR_CLIENTE" {
+		t.Errorf("rechazar cotización: %s", got)
+	}
+	b := nueva()
+	if got := estado(api.CancelarSolicitud(como("cliente"), b, operclient.AccionClienteEntrada{})); got != "CANCELADO_POR_CLIENTE" {
+		t.Errorf("cancelar: %s", got)
+	}
+	c := nueva()
+	cotizar(c)
+	if _, err := api.ConfirmarPago(como("cotizacion"), c, operclient.PagoEntrada{FechaPago: hoy}); err != nil {
+		t.Fatal(err)
+	}
+	if got := estado(api.RechazarSolicitud(como("jefe_operativo"), c, operclient.MotivoEntrada{Motivo: "sin escolta"})); got != "RECHAZADO_POR_AI27" {
+		t.Errorf("rechazar solicitud: %s", got)
+	}
+	// Sin la facultad, el mismo 403 que la ruta.
+	if _, err := api.AprobarSolicitud(como("cotizacion"), id); platformerrors.AsCategory(err) != platformerrors.CategoryProhibido {
+		t.Errorf("aprobar como cotizacion: %v", err)
+	}
+	// Sin claims: 401.
+	if _, err := api.ListarSolicitudes(ctx, operclient.ListarSolicitudesParams{}); platformerrors.AsCategory(err) != platformerrors.CategoryNoAutorizado {
+		t.Errorf("sin claims: %v", err)
+	}
+}
+
+// TestConsultasDeSolicitudesSinPool: sin el pool de op_solicitudes la fachada
+// responde 503 en lugar de fallar con un puntero nulo.
+func TestConsultasDeSolicitudesSinPool(t *testing.T) {
+	m, err := operacion.New(operacion.Pools{}, operacion.Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{Subject: "x", Rol: "cotizacion", Audiencia: auth.AudienciaInterno})
+	if _, err := m.Consultas().ListarSolicitudes(ctx, operclient.ListarSolicitudesParams{}); platformerrors.AsCategory(err) != platformerrors.CategoryDegradado {
+		t.Errorf("esperaba 503 (degradado), obtuve %v", err)
+	}
+}

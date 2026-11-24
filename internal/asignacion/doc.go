@@ -4,14 +4,14 @@
 // sobre (unidad_id, ventana); la carrera entre comprobar aptitud y reservar se
 // resuelve DENTRO de esta transacción, nunca con un candado en catalogos.
 //
-// Es el dueño de la ÚNICA excepción de GRANT cruzado del sistema: op_asignacion
+// Es el dueño de la PRIMERA de las dos excepciones de GRANT cruzado del sistema (la otra es op_solicitudes, ADR 39): op_asignacion
 // tiene USAGE sobre viajes/bitacora/auditoria (y lectura sobre roster, ADR 33)
 // para escribir la transición a ASIGNADO, el evento viaje.asignado en
 // viajes.outbox y el registro de auditoría en la MISMA transacción que la
 // reserva (P2). Nunca sobre catalogos.
 //
 // Sub-módulo interno de operacion. NO tiene outbox propio (ADR 35, DEC-068):
-// escribe viaje.asignado/viaje.reasignado en viajes.outbox, el único outbox de
+// escribe viaje.asignado/viaje.reasignado en viajes.outbox, el outbox de
 // la familia viaje.*, para que ADR 29 cumpla el orden por agregado.
 //
 // Scaffolding: sin casos de uso todavía. La aptitud NO gatea (DEC-055): el único

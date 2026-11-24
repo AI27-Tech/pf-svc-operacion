@@ -32,7 +32,7 @@ const audienciaCliente = "Cliente"
 //
 // audiencia y tenantID son la Audiencia de dominio y el tenant del actor
 // (claims.Audiencia, claims.TenantID). Habilitan la transición de cliente de
-// E9-T7 (DEC-111): un actor de audiencia Cliente solo puede cancelar o rechazar
+// E9-T7 (DEC-111): un actor de audiencia Cliente solo puede cancelar
 // SU PROPIO viaje. Para audiencia Interno no cambian el comportamiento previo.
 func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in operclient.TransicionEntrada, rol, audiencia, tenantID string) (*operclient.Viaje, error) {
 	destino := estados.EstadoViaje(string(in.AEstado))
@@ -50,11 +50,12 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		fhs       *time.Time
 		eta       *time.Time
 		creado    time.Time
+		penaliza  bool
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en
+		`SELECT estado, cliente_id, origen, fecha_hora_servicio, eta_estimado, creado_en, nacio_de_solicitud
 		   FROM viajes.viaje WHERE id = $1`, id,
-	).Scan(&estadoAct, &clienteID, &origen, &fhs, &eta, &creado)
+	).Scan(&estadoAct, &clienteID, &origen, &fhs, &eta, &creado, &penaliza)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 	}
@@ -77,15 +78,15 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		if tenantID == "" || tenantID != clienteID.String() {
 			return nil, platformerrors.NewNoEncontrado("operacion: viaje %s no encontrado", id)
 		}
-		// (b) El cliente solo cancela o rechaza (DEC-111). Cualquier otra arista
-		// es facultad del operador: 403 (DEC-111 #3).
-		if destino != estados.EstadoCancelado && destino != estados.EstadoRechazadoPorCliente {
-			return nil, platformerrors.NewProhibido("operacion: un cliente solo puede cancelar o rechazar su viaje")
+		// (b) El cliente solo cancela (DEC-111, DEC-148 #14: ya no rechaza la
+		// escolta). Cualquier otra arista es facultad del operador: 403.
+		if destino != estados.EstadoCanceladoPorCliente {
+			return nil, platformerrors.NewProhibido("operacion: un cliente solo puede cancelar su viaje")
 		}
-		// (c) Motivo OBLIGATORIO en cancelar y rechazar del cliente (DEC-111,
-		// supera DEC-020 #7). Texto libre; vacío o solo espacios no cuenta.
+		// (c) Motivo OBLIGATORIO en la cancelación del cliente (DEC-111, supera
+		// DEC-020 #7). Texto libre; vacío o solo espacios no cuenta.
 		if in.Causa == nil || strings.TrimSpace(*in.Causa) == "" {
-			return nil, platformerrors.NewValidacion("operacion: cancelar o rechazar el viaje exige un motivo")
+			return nil, platformerrors.NewValidacion("operacion: cancelar el viaje exige un motivo")
 		}
 	}
 
@@ -106,7 +107,7 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		}
 		motivoCierre = m
 	} else if g, ok := guardas[transicionKey{de, destino}]; ok {
-		if err := g(datosGuarda{fechaHoraServicio: fhs}, in); err != nil {
+		if err := g(in); err != nil {
 			return nil, err
 		}
 	}
@@ -180,19 +181,16 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		FechaHoraServicio: fhs,
 		EtaEstimado:       eta,
 		CreadoEn:          creado,
+		// DEC-148 #14: la marca de penalización es el origen del viaje.
+		CancelacionConPenalizacion: &penaliza,
 	}, nil
 }
 
 // transicionKey identifica una arista de la máquina de estados.
 type transicionKey struct{ de, a estados.EstadoViaje }
 
-// datosGuarda son los datos del viaje que una guarda puede necesitar.
-type datosGuarda struct {
-	fechaHoraServicio *time.Time
-}
-
 // guarda valida una arista más allá de que exista. Devuelve nil si pasa.
-type guarda func(datosGuarda, operclient.TransicionEntrada) error
+type guarda func(operclient.TransicionEntrada) error
 
 // guardas asocia cada arista con guarda a su validación. Las aristas SIN entrada
 // no tienen guarda y pasan libres (modela el dominio como tabla, no como ifs
@@ -201,35 +199,17 @@ type guarda func(datosGuarda, operclient.TransicionEntrada) error
 // rebanada las implemente (escolta → asignación; cierre → multi-parada /
 // incidencia).
 var guardas = map[transicionKey]guarda{
-	{estados.EstadoSolicitado, estados.EstadoAprobado}:         guardaFechaHoraServicio,
-	{estados.EstadoSolicitado, estados.EstadoRechazadoPorAi27}: guardaMotivo,
-	{estados.EstadoAprobado, estados.EstadoAsignado}:           guardaDiferida("la asignación se hace con asignarRecursos (reserva de escolta), no con transiciones"),
+	{estados.EstadoAprobado, estados.EstadoAsignado}: guardaDiferida("la asignación se hace con asignarRecursos (reserva de escolta), no con transiciones"),
 	// Las tres aristas de cierre (EN_DESTINO/EN_DESCARGA/EN_TRANSITO -> CERRADO)
 	// NO están aquí: su validación necesita leer la base (incidencia abierta) y el
 	// rol del actor, que la firma de `guarda` no admite. La resuelve
 	// validarCierre, invocada desde Transicionar cuando el destino es CERRADO.
 }
 
-// guardaFechaHoraServicio exige fecha_hora_servicio antes de aprobar (DEC-010 #2).
-func guardaFechaHoraServicio(d datosGuarda, _ operclient.TransicionEntrada) error {
-	if d.fechaHoraServicio == nil {
-		return platformerrors.NewValidacion("operacion: aprobar un viaje exige fecha_hora_servicio definida")
-	}
-	return nil
-}
-
-// guardaMotivo exige una causa en el rechazo (DEC-020 #2).
-func guardaMotivo(_ datosGuarda, in operclient.TransicionEntrada) error {
-	if in.Causa == nil || strings.TrimSpace(*in.Causa) == "" {
-		return platformerrors.NewValidacion("operacion: el rechazo exige una causa (motivo)")
-	}
-	return nil
-}
-
 // guardaDiferida rechaza una arista cuya guarda real depende de un subsistema que
 // esta rebanada no construye todavía. 409 con mensaje claro.
 func guardaDiferida(motivo string) guarda {
-	return func(datosGuarda, operclient.TransicionEntrada) error {
+	return func(operclient.TransicionEntrada) error {
 		return platformerrors.NewConflicto("operacion: transición no soportada todavía: %s", motivo)
 	}
 }
