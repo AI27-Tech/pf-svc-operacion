@@ -31,12 +31,19 @@ type BeginTx interface {
 type Servicio struct {
 	tx  BeginTx
 	pub *outbox.Publisher
+	now func() time.Time
 }
 
 // NewServicio recibe la frontera transaccional (el pool del rol op_viajes) y el
 // publicador de outbox. No lee entorno.
 func NewServicio(tx BeginTx, pub *outbox.Publisher) *Servicio {
-	return &Servicio{tx: tx, pub: pub}
+	return &Servicio{tx: tx, pub: pub, now: time.Now}
+}
+
+// ConReloj sustituye el reloj antes de usar el servicio, para probar el límite de la fecha/hora.
+func (s *Servicio) ConReloj(now func() time.Time) *Servicio {
+	s.now = now
+	return s
 }
 
 // paginaMax es el tamaño de página de Listar.
@@ -160,25 +167,31 @@ func (s *Servicio) Crear(ctx context.Context, in operclient.CrearViajeEntrada, r
 // obsolescencia (`stale`) la deriva el bff al leer, no operacion. No publica
 // evento (los eventos viaje.* no incluyen el ETA).
 func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient.EtaEntrada) (*operclient.Viaje, error) {
-	return s.editarNoTerminal(ctx, id, "fijar ETA",
-		`UPDATE viajes.viaje SET eta_estimado = $2 WHERE id = $1`, in.EtaEstimado.UTC())
+	return s.editarNoTerminal(ctx, id, "fijar ETA", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE viajes.viaje SET eta_estimado = $2 WHERE id = $1`, id, in.EtaEstimado.UTC())
+		return err
+	})
 }
 
-// CompletarFechaHora escribe fecha_hora_servicio sobre un viaje ya creado
-// (completarFechaHora, E1-HU-003): la aprobación la exige (guarda
-// fecha_hora_servicio_definida, DEC-010 #2). Igual que FijarEta, no es cambio de
-// estado: solo rechaza un viaje terminal. Reemplaza el valor previo. No publica
-// evento (el registro no declara ninguno para este dato).
+// CompletarFechaHora reemplaza fecha_hora_servicio en un viaje no terminal.
+// La nueva fecha debe ser posterior al momento de guardar (DEC-148 #66).
+// No cambia el estado ni publica evento.
 func (s *Servicio) CompletarFechaHora(ctx context.Context, id operclient.Id, in operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
-	return s.editarNoTerminal(ctx, id, "completar la fecha/hora del servicio",
-		`UPDATE viajes.viaje SET fecha_hora_servicio = $2 WHERE id = $1`, in.FechaHoraServicio.UTC())
+	return s.editarNoTerminal(ctx, id, "completar la fecha/hora del servicio", func(tx pgx.Tx) error {
+		// Se comparan instantes: UTC y America/Mexico_City dan el mismo orden.
+		if !in.FechaHoraServicio.After(s.now()) {
+			return platformerrors.NewValidacion("operacion: la fecha y hora del servicio debe ser posterior al momento actual")
+		}
+		_, err := tx.Exec(ctx, `UPDATE viajes.viaje SET fecha_hora_servicio = $2 WHERE id = $1`, id, in.FechaHoraServicio.UTC())
+		return err
+	})
 }
 
-// editarNoTerminal aplica `update` ($1 = id, $2 = valor) a un viaje que no está
+// editarNoTerminal aplica update a un viaje que no está
 // en estado terminal y devuelve el viaje resultante. Bloquea la fila (FOR UPDATE)
 // para que una transición concurrente a terminal no se cuele entre la guarda y
 // la escritura. 404 si no existe; 409 viaje_en_estado_terminal si es terminal.
-func (s *Servicio) editarNoTerminal(ctx context.Context, id operclient.Id, accion, update string, valor any) (*operclient.Viaje, error) {
+func (s *Servicio) editarNoTerminal(ctx context.Context, id operclient.Id, accion string, update func(pgx.Tx) error) (*operclient.Viaje, error) {
 	tx, err := s.tx.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -197,7 +210,7 @@ func (s *Servicio) editarNoTerminal(ctx context.Context, id operclient.Id, accio
 		return nil, platformerrors.NewConflictoCodigo("viaje_en_estado_terminal",
 			"operacion: no se puede %s en un viaje en estado terminal (%s)", accion, estado)
 	}
-	if _, err := tx.Exec(ctx, update, id, valor); err != nil {
+	if err := update(tx); err != nil {
 		return nil, fmt.Errorf("operacion: %s: %w", accion, err)
 	}
 	v, err := s.leerViaje(ctx, tx, id)

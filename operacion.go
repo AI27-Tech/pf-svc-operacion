@@ -749,8 +749,7 @@ func (m *Module) handleReasignar(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFijarEta atiende PATCH /api/v1/viajes/{id}/eta: lee el ETA capturado a
-// mano (EtaEntrada) y delega en viajes. No es un cambio de estado (ADR 20): solo
-// rechaza si el viaje está en estado terminal.
+// mano (EtaEntrada) y delega en viajes. No es un cambio de estado (ADR 20).
 func (m *Module) handleFijarEta(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
@@ -762,12 +761,19 @@ func (m *Module) handleFijarEta(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
 		return
 	}
-	v, err := m.viajes.FijarEta(r.Context(), id, body)
+	v, err := m.fijarEta(r.Context(), id, body)
 	if err != nil {
 		escribirError(w, err)
 		return
 	}
 	escribirJSON(w, http.StatusOK, v)
+}
+
+func (m *Module) fijarEta(ctx context.Context, id operclient.Id, body operclient.EtaEntrada) (*operclient.Viaje, error) {
+	if err := exigirFacultad(ctx, "fijarEta"); err != nil {
+		return nil, err
+	}
+	return m.viajes.FijarEta(ctx, id, body)
 }
 
 // handleRegistrarBitacora atiende POST /api/v1/viajes/{id}/bitacora: lee el texto
@@ -787,16 +793,19 @@ func (m *Module) handleRegistrarBitacora(w http.ResponseWriter, r *http.Request)
 		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
 		return
 	}
-	var actor string
-	if claims := auth.ClaimsFromContext(r.Context()); claims != nil {
-		actor = claims.Subject
-	}
-	e, err := m.bitacora.RegistrarEntrada(r.Context(), id, body, actor)
+	e, err := m.registrarEntradaBitacora(r.Context(), id, body)
 	if err != nil {
 		escribirError(w, err)
 		return
 	}
 	escribirJSON(w, http.StatusCreated, e)
+}
+
+func (m *Module) registrarEntradaBitacora(ctx context.Context, id operclient.Id, body operclient.EntradaBitacoraEntrada) (*operclient.EntradaBitacora, error) {
+	if err := exigirFacultad(ctx, "registrarEntradaBitacora"); err != nil {
+		return nil, err
+	}
+	return m.bitacora.RegistrarEntrada(ctx, id, body, auth.ClaimsFromContext(ctx).Subject)
 }
 
 // handleListarBitacora atiende GET /api/v1/viajes/{id}/bitacora: lee el cursor
@@ -894,12 +903,19 @@ func (m *Module) handleAbrirEstadia(w http.ResponseWriter, r *http.Request) {
 		escribirError(w, platformerrors.NewValidacion("operacion: cuerpo de la petición inválido: %v", err))
 		return
 	}
-	est, err := m.viajes.AbrirEstadia(r.Context(), id, body)
+	est, err := m.abrirEstadia(r.Context(), id, body)
 	if err != nil {
 		escribirError(w, err)
 		return
 	}
 	escribirJSON(w, http.StatusCreated, est)
+}
+
+func (m *Module) abrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error) {
+	if err := exigirFacultad(ctx, "abrirEstadia"); err != nil {
+		return nil, err
+	}
+	return m.viajes.AbrirEstadia(ctx, id, body)
 }
 
 // handleCerrarEstadia atiende PATCH /api/v1/viajes/{id}/estadias/{eid}: cierra la
@@ -917,12 +933,19 @@ func (m *Module) handleCerrarEstadia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// El cuerpo es vacío por contrato; no se decodifica nada de él.
-	est, err := m.viajes.CerrarEstadia(r.Context(), id, eid)
+	est, err := m.cerrarEstadia(r.Context(), id, eid)
 	if err != nil {
 		escribirError(w, err)
 		return
 	}
 	escribirJSON(w, http.StatusOK, est)
+}
+
+func (m *Module) cerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error) {
+	if err := exigirFacultad(ctx, "cerrarEstadia"); err != nil {
+		return nil, err
+	}
+	return m.viajes.CerrarEstadia(ctx, id, eid)
 }
 
 // handleListarEstadias atiende GET /api/v1/viajes/{id}/estadias: lee el cursor
@@ -1365,12 +1388,12 @@ func (c *consultas) DescargarAdjunto(ctx context.Context, id, aid operclient.Id)
 	return c.m.adjuntos.Descargar(ctx, id, aid, actor)
 }
 
-// FijarEta delega en el mismo caso de uso que handleFijarEta (I3). No usa actor.
+// FijarEta comparte la facultad y el caso de uso con handleFijarEta (I3).
 func (c *consultas) FijarEta(ctx context.Context, id operclient.Id, body operclient.EtaEntrada) (*operclient.Viaje, error) {
 	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
 		return nil, err
 	}
-	return c.m.viajes.FijarEta(ctx, id, body)
+	return c.m.fijarEta(ctx, id, body)
 }
 
 // AsignarRecursos delega en el mismo caso de uso que handleAsignar (I3). Sin
@@ -1386,18 +1409,12 @@ func (c *consultas) AsignarRecursos(ctx context.Context, id operclient.Id, body 
 	return c.m.asignacion.Asignar(ctx, id, body, claims.Subject)
 }
 
-// RegistrarEntradaBitacora delega en el mismo caso de uso que
-// handleRegistrarBitacora (I3). Sin claims es error: el autor de la entrada sale
-// del sujeto del token.
+// RegistrarEntradaBitacora comparte la facultad y el caso de uso con handleRegistrarBitacora (I3).
 func (c *consultas) RegistrarEntradaBitacora(ctx context.Context, id operclient.Id, body operclient.EntradaBitacoraEntrada) (*operclient.EntradaBitacora, error) {
 	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
 		return nil, err
 	}
-	claims := auth.ClaimsFromContext(ctx)
-	if claims == nil {
-		return nil, platformerrors.NewNoAutorizado("operacion: registrarEntradaBitacora sin claims en el contexto")
-	}
-	return c.m.bitacora.RegistrarEntrada(ctx, id, body, claims.Subject)
+	return c.m.registrarEntradaBitacora(ctx, id, body)
 }
 
 // AbrirIncidencia delega en el mismo caso de uso que handleAbrirIncidencia (I3);
@@ -1434,20 +1451,20 @@ func (c *consultas) ListarEstadias(ctx context.Context, id operclient.Id, params
 	return c.m.viajes.ListarEstadias(ctx, id, params)
 }
 
-// AbrirEstadia delega en el mismo caso de uso que handleAbrirEstadia (I3).
+// AbrirEstadia comparte la facultad y el caso de uso con handleAbrirEstadia (I3).
 func (c *consultas) AbrirEstadia(ctx context.Context, id operclient.Id, body operclient.EstadiaEntrada) (*operclient.Estadia, error) {
 	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
 		return nil, err
 	}
-	return c.m.viajes.AbrirEstadia(ctx, id, body)
+	return c.m.abrirEstadia(ctx, id, body)
 }
 
-// CerrarEstadia delega en el mismo caso de uso que handleCerrarEstadia (I3).
+// CerrarEstadia comparte la facultad y el caso de uso con handleCerrarEstadia (I3).
 func (c *consultas) CerrarEstadia(ctx context.Context, id, eid operclient.Id) (*operclient.Estadia, error) {
 	if err := c.m.exigirAlcance(ctx, id, alcance.Subrecurso); err != nil {
 		return nil, err
 	}
-	return c.m.viajes.CerrarEstadia(ctx, id, eid)
+	return c.m.cerrarEstadia(ctx, id, eid)
 }
 
 // ListarUnidades comparte la facultad y el caso de uso con handleListarUnidades (I3).

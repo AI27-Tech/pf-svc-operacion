@@ -1,5 +1,16 @@
 # CHANGELOG
 
+## 2026-11-25 13:06 — `viajes`: histórico de solo lectura para el Jefe Operativo (DEC-152 #6 y #9)
+
+**Para quién:** el Jefe Operativo y el equipo de monitoreo del panel interno. Las reglas son las mismas por HTTP y en proceso.
+
+**Cambios:**
+- El Jefe Operativo conserva la lectura de ficha, bitácora, estadías e incidencias. Recibe `403` al fijar ETA, registrar notas de bitácora, abrir o cerrar estadías y hacer avanzar el viaje. Conserva marcar `APTO_PARA_SALIDA` y cerrar, como establece DEC-149 #7 y #8.
+- `completarFechaHora` conserva sus roles de Jefe Operativo y Administrador (DEC-152 #8). Ahora rechaza con `400` una fecha anterior o igual al instante de guardar (DEC-148 #66). Conserva el `409` para viajes terminales.
+- Las pruebas verifican permisos y resultados por HTTP y en proceso, y el límite de fecha con reloj fijo y un desplazamiento de zona distinto. No se cambió el contrato; falta alinear la descripción de `completarFechaHora`.
+
+**Archivos:** `facultades.go`, `operacion.go`, `internal/viajes/{transicion,servicio,servicio_integration_test}.go`, `consultas_integration_test.go`, `CHANGELOG.md`.
+
 ## 2026-11-25 10:00 — `solicitudes`: el jefe operativo no ve el motivo de `pago_revertido` (DEC-148 #73, revisión de #111)
 
 **Para quién:** quien mantiene `operacion`, `bff` y el panel interno. Sin ola de contrato.
