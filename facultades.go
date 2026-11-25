@@ -13,6 +13,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// rolesMonitoreo reúne los roles que registran el seguimiento del viaje en su alcance (DEC-149 #8).
+var rolesMonitoreo = []roles.Rol{roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador}
+
 // facultades fija, por operationId, qué roles pueden invocar las operaciones del
 // flujo interno del panel que gatean por rol (DEC-060). Es la única copia de la
 // regla: la consultan el handler HTTP y la fachada en proceso (I3). La audiencia
@@ -50,8 +53,12 @@ var facultades = map[string][]roles.Rol{
 	// El histórico es de audiencia interna: el cliente y los demás roles, 403.
 	"listarHistoricoSolicitud": {roles.RolCotizacion, roles.RolJefeOperativo, roles.RolAdministrador},
 	"rechazarSolicitud":        {roles.RolJefeOperativo, roles.RolAdministrador},
-	// DEC-060 #2: la ficha técnica es del monitorista, y del supervisor/coordinador en su alcance.
-	"guardarFicha": {roles.RolMonitorista, roles.RolSupervisor, roles.RolCoordinador, roles.RolAdministrador},
+	// DEC-152 #6 y #9: el jefe operativo consulta el histórico, pero no lo escribe ni fija ETA.
+	"guardarFicha":             rolesMonitoreo,
+	"fijarEta":                 rolesMonitoreo,
+	"registrarEntradaBitacora": rolesMonitoreo,
+	"abrirEstadia":             rolesMonitoreo,
+	"cerrarEstadia":            rolesMonitoreo,
 }
 
 // exigirFacultad rechaza sin claims (401) y con un rol fuera de facultades[op] (403).
