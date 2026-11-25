@@ -178,11 +178,12 @@ func (s *Servicio) FijarEta(ctx context.Context, id operclient.Id, in operclient
 // No cambia el estado ni publica evento.
 func (s *Servicio) CompletarFechaHora(ctx context.Context, id operclient.Id, in operclient.FechaHoraEntrada) (*operclient.Viaje, error) {
 	return s.editarNoTerminal(ctx, id, "completar la fecha/hora del servicio", func(tx pgx.Tx) error {
-		// Se comparan instantes: UTC y America/Mexico_City dan el mismo orden.
-		if !in.FechaHoraServicio.After(s.now()) {
+		// Compara el mismo instante que PostgreSQL guardará, a precisión de microsegundos.
+		fecha := in.FechaHoraServicio.UTC().Truncate(time.Microsecond)
+		if !fecha.After(s.now()) {
 			return platformerrors.NewValidacion("operacion: la fecha y hora del servicio debe ser posterior al momento actual")
 		}
-		_, err := tx.Exec(ctx, `UPDATE viajes.viaje SET fecha_hora_servicio = $2 WHERE id = $1`, id, in.FechaHoraServicio.UTC())
+		_, err := tx.Exec(ctx, `UPDATE viajes.viaje SET fecha_hora_servicio = $2 WHERE id = $1`, id, fecha)
 		return err
 	})
 }

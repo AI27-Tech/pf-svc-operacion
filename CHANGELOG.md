@@ -7,7 +7,7 @@
 **Cambios:**
 - El Jefe Operativo conserva la lectura de ficha, bitácora, estadías e incidencias. Recibe `403` al fijar ETA, registrar notas de bitácora, abrir o cerrar estadías y hacer avanzar el viaje. Conserva marcar `APTO_PARA_SALIDA` y cerrar, como establece DEC-149 #7 y #8.
 - `completarFechaHora` conserva sus roles de Jefe Operativo y Administrador (DEC-152 #8). Ahora rechaza con `400` una fecha anterior o igual al instante de guardar (DEC-148 #66). Conserva el `409` para viajes terminales.
-- Las pruebas verifican permisos y resultados por HTTP y en proceso, y el límite de fecha con reloj fijo y un desplazamiento de zona distinto. No se cambió el contrato; falta alinear la descripción de `completarFechaHora`.
+- La fecha se valida con la precisión de microsegundos que guarda PostgreSQL. Las pruebas cubren ese límite, una zona horaria distinta y la precedencia del `409` terminal sobre el `400` de fecha, por HTTP y en proceso. Falta alinear el contrato.
 
 **Archivos:** `facultades.go`, `operacion.go`, `internal/viajes/{transicion,servicio,servicio_integration_test}.go`, `consultas_integration_test.go`, `CHANGELOG.md`.
 

@@ -667,11 +667,19 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
 	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id='"+v.Id.String()+"'")
-	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: pasada})
+	esStatus(t, "viaje terminal con fecha pasada", err, http.StatusConflict)
 	if got := platformerrors.CodigoDe(err); got != "viaje_en_estado_terminal" {
 		t.Errorf("terminal: codigo %q (err %v), want viaje_en_estado_terminal", got, err)
 	}
-	mismoStatus(t, m, err, http.MethodPatch, path, cuerpo(fecha), 409)
+	rec := pedir(m, http.MethodPatch, path, cuerpo(pasada), "jefe_operativo")
+	var problema struct {
+		Codigo string `json:"codigo"`
+	}
+	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &problema) != nil ||
+		problema.Codigo != "viaje_en_estado_terminal" {
+		t.Errorf("HTTP viaje terminal con fecha pasada: %d %s; quiere 409 viaje_en_estado_terminal", rec.Code, rec.Body)
+	}
 }
 
 // TestConsultasListarIncidencias: el histórico trae la resuelta y la abierta, en

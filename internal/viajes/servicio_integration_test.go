@@ -280,6 +280,7 @@ func TestCompletarFechaHoraExigeInstanteFuturo(t *testing.T) {
 	}{
 		{"anterior", now.Add(-time.Second).In(zona)},
 		{"mismo_instante_en_otra_zona", now.In(zona)},
+		{"posterior_pero_igual_al_persistir", now.Add(time.Nanosecond).In(zona)},
 	} {
 		t.Run(tc.nombre, func(t *testing.T) {
 			_, err := svc.CompletarFechaHora(ctx, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: tc.fecha})
