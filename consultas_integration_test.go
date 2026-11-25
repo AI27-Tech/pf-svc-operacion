@@ -2,6 +2,7 @@ package operacion_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,18 +24,26 @@ var claimsJefe = &auth.Claims{Subject: "jefe-1", Rol: "jefe_operativo", Audienci
 
 // autenticadorJefe acepta cualquier token y devuelve claimsJefe, para montar la
 // ruta HTTP con el MISMO actor que la fachada y comparar ambos caminos. El token
-// "monitorista" devuelve claimsMonitorista, para las rutas que gatean por rol.
+// Los tokens de prueba nombrados devuelven el actor de cada rol.
 type autenticadorJefe struct{}
 
 func (autenticadorJefe) VerifyToken(_ context.Context, token string) (*auth.Claims, error) {
-	if token == "monitorista" {
+	switch token {
+	case "monitorista":
 		return claimsMonitorista, nil
+	case "supervisor":
+		return claimsSupervisor, nil
+	case "coordinador":
+		return claimsCoordinador, nil
+	case "administrador":
+		return claimsAdmin, nil
 	}
 	return claimsJefe, nil
 }
 
 // claimsMonitorista son los claims de un monitorista: edita la ficha (DEC-060 #2).
 var claimsMonitorista = &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
+var claimsCoordinador = &auth.Claims{Subject: "coord-1", Rol: "coordinador", Audiencia: auth.AudienciaInterno}
 
 // moduloConViajes aplica las migraciones de viajes (mismo setup que
 // internal/viajes) y construye el módulo como lo hace core, con el pool op_viajes.
@@ -118,6 +127,68 @@ func TestConsultasTransicionarViaje(t *testing.T) {
 	}
 	if det.Viaje.Estado != "APROBADO" {
 		t.Errorf("estado final: got %q, want APROBADO", det.Viaje.Estado)
+	}
+}
+
+func TestAvanceViajePorRol(t *testing.T) {
+	ctx := context.Background()
+	m := moduloConViajes(t, ctx)
+	api := m.Consultas()
+	admin, cerrar := dbtest.AdminConn(t, ctx)
+	defer cerrar()
+
+	for _, tc := range []struct {
+		de, a operclient.EstadoViaje
+		actor *auth.Claims
+	}{
+		{operclient.ASIGNADO, operclient.ENEMBARQUE, claimsMonitorista},
+		{operclient.ASIGNADO, operclient.ENTRANSITO, claimsAdmin},
+		{operclient.ENTRANSITO, operclient.ENDESTINO, claimsSupervisor},
+		{operclient.ENDESTINO, operclient.ENDESCARGA, claimsCoordinador},
+		{operclient.ENDESCARGA, operclient.ENTRANSITO, claimsMonitorista},
+		{operclient.ASIGNADO, operclient.APTOPARASALIDA, claimsJefe},
+		{operclient.ENDESTINO, operclient.CERRADO, claimsJefe},
+	} {
+		t.Run(string(tc.de)+"_"+string(tc.a), func(t *testing.T) {
+			for _, transporte := range []string{"fachada", "HTTP"} {
+				t.Run(transporte, func(t *testing.T) {
+					id := viajeAprobado(t, ctx, api)
+					if _, err := admin.Exec(ctx, "UPDATE viajes.viaje SET estado=$1 WHERE id=$2", tc.de, id); err != nil {
+						t.Fatalf("preparar estado de origen: %v", err)
+					}
+					if tc.actor != claimsAdmin && tc.actor != claimsJefe {
+						darAlcance(t, ctx, tc.actor, id)
+					}
+					in := operclient.TransicionEntrada{AEstado: tc.a}
+					body := `{"a_estado":"` + string(tc.a) + `"}`
+					if tc.a == operclient.CERRADO {
+						in.MotivoCierre = ptr(operclient.Normal)
+						body = `{"a_estado":"CERRADO","motivo_cierre":"normal"}`
+					}
+					path := "/api/v1/viajes/" + id.String() + "/transiciones"
+					if tc.actor != claimsJefe {
+						if transporte == "fachada" {
+							_, err := api.TransicionarViaje(como(claimsJefe), id, in)
+							if err == nil || platformerrors.AsCategory(err).HTTPStatus() != 403 {
+								t.Fatalf("Jefe Operativo: %v; quiere 403", err)
+							}
+						} else if rec := pedir(m, http.MethodPost, path, body, "x"); rec.Code != 403 {
+							t.Fatalf("HTTP Jefe Operativo: %d %s; quiere 403", rec.Code, rec.Body)
+						}
+					}
+
+					if transporte == "fachada" {
+						out, err := api.TransicionarViaje(como(tc.actor), id, in)
+						if err != nil || out.Estado != tc.a {
+							t.Fatalf("%s: viaje %+v, error %v; quiere %s", tc.actor.Rol, out, err, tc.a)
+						}
+					} else if rec := pedir(m, http.MethodPost, path, body, tc.actor.Rol); rec.Code != 200 ||
+						!strings.Contains(rec.Body.String(), `"estado":"`+string(tc.a)+`"`) {
+						t.Fatalf("HTTP %s: %d %s; quiere 200 y estado %s", tc.actor.Rol, rec.Code, rec.Body, tc.a)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -239,8 +310,13 @@ func TestConsultasFijarEta(t *testing.T) {
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
 
 	id := viajeAprobado(t, ctx, api)
+	darAlcance(t, ctx, claimsMonitorista, id)
 	eta := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
-	v, err := api.FijarEta(ctxJefe, id, operclient.EtaEntrada{EtaEstimado: eta})
+	path := "/api/v1/viajes/" + id.String() + "/eta"
+	body := `{"eta_estimado":"` + eta.Format(time.RFC3339) + `"}`
+	_, err := api.FijarEta(ctxJefe, id, operclient.EtaEntrada{EtaEstimado: eta})
+	mismoStatus(t, m, err, http.MethodPatch, path, body, 403)
+	v, err := api.FijarEta(como(claimsMonitorista), id, operclient.EtaEntrada{EtaEstimado: eta})
 	if err != nil {
 		t.Fatalf("FijarEta: %v", err)
 	}
@@ -249,8 +325,18 @@ func TestConsultasFijarEta(t *testing.T) {
 	}
 
 	otro := uuid.New()
-	_, err = api.FijarEta(ctxJefe, otro, operclient.EtaEntrada{EtaEstimado: eta})
-	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+otro.String()+"/eta", `{"eta_estimado":"`+eta.Format(time.RFC3339)+`"}`, 404)
+	_, err = api.FijarEta(como(claimsAdmin), otro, operclient.EtaEntrada{EtaEstimado: eta})
+	esStatus(t, "ETA de viaje inexistente", err, 404)
+	if rec := pedir(m, http.MethodPatch, "/api/v1/viajes/"+otro.String()+"/eta", body, "administrador"); rec.Code != 404 {
+		t.Errorf("HTTP ETA de viaje inexistente: %d %s; quiere 404", rec.Code, rec.Body)
+	}
+	var actualizado operclient.Viaje
+	etaAdmin := eta.Add(time.Hour)
+	bodyAdmin := `{"eta_estimado":"` + etaAdmin.Format(time.RFC3339) + `"}`
+	if rec := pedir(m, http.MethodPatch, path, bodyAdmin, "administrador"); rec.Code != 200 ||
+		json.Unmarshal(rec.Body.Bytes(), &actualizado) != nil || actualizado.EtaEstimado == nil || !actualizado.EtaEstimado.Equal(etaAdmin) {
+		t.Errorf("HTTP ETA: %d %s; quiere 200 con el ETA", rec.Code, rec.Body)
+	}
 }
 
 // TestConsultasAsignarRecursos: asigna la escolta a un viaje aprobado (queda
@@ -291,12 +377,17 @@ func TestConsultasBitacora(t *testing.T) {
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
 
 	id := viajeAprobado(t, ctx, api)
-	e, err := api.RegistrarEntradaBitacora(ctxJefe, id, operclient.EntradaBitacoraEntrada{Texto: "salida de origen"})
+	darAlcance(t, ctx, claimsMonitorista, id)
+	path := "/api/v1/viajes/" + id.String() + "/bitacora"
+	in := operclient.EntradaBitacoraEntrada{Texto: "salida de origen"}
+	_, err := api.RegistrarEntradaBitacora(ctxJefe, id, in)
+	mismoStatus(t, m, err, http.MethodPost, path, `{"texto":"salida de origen"}`, 403)
+	e, err := api.RegistrarEntradaBitacora(como(claimsMonitorista), id, in)
 	if err != nil {
 		t.Fatalf("RegistrarEntradaBitacora: %v", err)
 	}
-	if e.Autor != "jefe-1" || e.Texto != "salida de origen" {
-		t.Errorf("entrada: got autor %q texto %q, want jefe-1 / salida de origen", e.Autor, e.Texto)
+	if e.Autor != "mon-1" || e.Texto != "salida de origen" {
+		t.Errorf("entrada: got autor %q texto %q, want mon-1 / salida de origen", e.Autor, e.Texto)
 	}
 	pag, err := api.ListarBitacora(ctxJefe, id, operclient.ListarBitacoraParams{})
 	if err != nil {
@@ -306,8 +397,18 @@ func TestConsultasBitacora(t *testing.T) {
 		t.Errorf("listar: got %d entradas, want 1 con id %s", len(pag.Items), e.Id)
 	}
 
-	_, err = api.RegistrarEntradaBitacora(ctxJefe, id, operclient.EntradaBitacoraEntrada{Texto: ""})
-	mismoStatus(t, m, err, http.MethodPost, "/api/v1/viajes/"+id.String()+"/bitacora", `{"texto":""}`, 400)
+	if rec := pedir(m, http.MethodGet, path, "", "x"); rec.Code != 200 || !strings.Contains(rec.Body.String(), e.Id.String()) {
+		t.Errorf("HTTP histórico de bitácora: %d %s; quiere 200 con la entrada", rec.Code, rec.Body)
+	}
+	if rec := pedir(m, http.MethodPost, path, `{"texto":"llegada"}`, "administrador"); rec.Code != 201 ||
+		!strings.Contains(rec.Body.String(), `"autor":"adm-1"`) {
+		t.Errorf("HTTP registrar bitácora: %d %s; quiere 201 con el autor", rec.Code, rec.Body)
+	}
+	_, err = api.RegistrarEntradaBitacora(como(claimsMonitorista), id, operclient.EntradaBitacoraEntrada{Texto: ""})
+	esStatus(t, "nota vacía", err, 400)
+	if rec := pedir(m, http.MethodPost, path, `{"texto":""}`, "monitorista"); rec.Code != 400 {
+		t.Errorf("HTTP nota vacía: %d %s; quiere 400", rec.Code, rec.Body)
+	}
 
 	_, err = api.RegistrarEntradaBitacora(ctx, id, operclient.EntradaBitacoraEntrada{Texto: "x"})
 	if got := platformerrors.AsCategory(err); got != platformerrors.CategoryNoAutorizado {
@@ -346,6 +447,8 @@ func TestConsultasIncidencias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AbrirIncidencia (segunda): %v", err)
 	}
+	_, err = api.ResolverIncidencia(como(claimsJefe), id, abierta.Id, operclient.ResolucionIncidenciaEntrada{Resolucion: "reparada"})
+	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+id.String()+"/incidencias/"+abierta.Id.String(), `{"resolucion":"reparada"}`, 403)
 	_, err = api.ResolverIncidencia(auth.ContextWithClaims(ctx, claimsMonitorista), id, abierta.Id, operclient.ResolucionIncidenciaEntrada{Resolucion: "reparada"})
 	if got := platformerrors.AsCategory(err).HTTPStatus(); got != 403 {
 		t.Errorf("monitorista resuelve: got status %d (err %v), want 403", got, err)
@@ -370,7 +473,13 @@ func TestConsultasEstadias(t *testing.T) {
 	ctxJefe := auth.ContextWithClaims(ctx, claimsJefe)
 
 	id := viajeAprobado(t, ctx, api)
-	est, err := api.AbrirEstadia(ctxJefe, id, operclient.EstadiaEntrada{Motivo: operclient.Combustible, EjeAutorizacion: operclient.Autorizada})
+	darAlcance(t, ctx, claimsMonitorista, id)
+	path := "/api/v1/viajes/" + id.String() + "/estadias"
+	in := operclient.EstadiaEntrada{Motivo: operclient.Combustible, EjeAutorizacion: operclient.Autorizada}
+	const body = `{"motivo":"combustible","eje_autorizacion":"autorizada"}`
+	_, err := api.AbrirEstadia(ctxJefe, id, in)
+	mismoStatus(t, m, err, http.MethodPost, path, body, 403)
+	est, err := api.AbrirEstadia(como(claimsMonitorista), id, in)
 	if err != nil {
 		t.Fatalf("AbrirEstadia: %v", err)
 	}
@@ -381,7 +490,12 @@ func TestConsultasEstadias(t *testing.T) {
 	if len(pag.Items) != 1 || pag.Items[0].Id != est.Id {
 		t.Errorf("listar: got %d estadías, want 1 con id %s", len(pag.Items), est.Id)
 	}
-	cerrada, err := api.CerrarEstadia(ctxJefe, id, est.Id)
+	if rec := pedir(m, http.MethodGet, path, "", "x"); rec.Code != 200 || !strings.Contains(rec.Body.String(), est.Id.String()) {
+		t.Errorf("HTTP histórico de estadías: %d %s; quiere 200 con la estadía", rec.Code, rec.Body)
+	}
+	_, err = api.CerrarEstadia(ctxJefe, id, est.Id)
+	mismoStatus(t, m, err, http.MethodPatch, path+"/"+est.Id.String(), `{}`, 403)
+	cerrada, err := api.CerrarEstadia(como(claimsMonitorista), id, est.Id)
 	if err != nil {
 		t.Fatalf("CerrarEstadia: %v", err)
 	}
@@ -390,8 +504,21 @@ func TestConsultasEstadias(t *testing.T) {
 	}
 
 	otra := uuid.New()
-	_, err = api.CerrarEstadia(ctxJefe, id, otra)
-	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+id.String()+"/estadias/"+otra.String(), `{}`, 404)
+	_, err = api.CerrarEstadia(como(claimsAdmin), id, otra)
+	esStatus(t, "cerrar una estadía inexistente", err, 404)
+	if rec := pedir(m, http.MethodPatch, path+"/"+otra.String(), `{}`, "administrador"); rec.Code != 404 {
+		t.Errorf("HTTP estadía inexistente: %d %s; quiere 404", rec.Code, rec.Body)
+	}
+	var abiertaHTTP operclient.Estadia
+	if rec := pedir(m, http.MethodPost, path, body, "administrador"); rec.Code != 201 ||
+		json.Unmarshal(rec.Body.Bytes(), &abiertaHTTP) != nil || abiertaHTTP.Id == uuid.Nil || abiertaHTTP.Cierre != nil {
+		t.Fatalf("HTTP abrir estadía: %d %s; quiere 201 con estadía abierta", rec.Code, rec.Body)
+	}
+	var cerradaHTTP operclient.Estadia
+	if rec := pedir(m, http.MethodPatch, path+"/"+abiertaHTTP.Id.String(), `{}`, "administrador"); rec.Code != 200 ||
+		json.Unmarshal(rec.Body.Bytes(), &cerradaHTTP) != nil || cerradaHTTP.Cierre == nil {
+		t.Errorf("HTTP cerrar estadía: %d %s; quiere 200 con cierre", rec.Code, rec.Body)
+	}
 }
 
 // TestConsultasObtenerAsignacion: un interno lee la escolta (vacía sin
@@ -503,7 +630,17 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 		t.Fatalf("crear viaje: %v", err)
 	}
 
-	fecha := time.Date(2026, 11, 20, 15, 30, 0, 0, time.UTC)
+	path := "/api/v1/viajes/" + v.Id.String() + "/fecha-hora"
+	cuerpo := func(fecha time.Time) string { return `{"fecha_hora_servicio":"` + fecha.Format(time.RFC3339) + `"}` }
+	ahora := time.Now().UTC().Truncate(time.Second)
+	pasada := ahora.Add(-time.Hour)
+	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: pasada})
+	mismoStatus(t, m, err, http.MethodPatch, path, cuerpo(pasada), 400)
+	if det, err := api.ObtenerViaje(ctxJefe, v.Id); err != nil || det.Viaje.FechaHoraServicio != nil {
+		t.Errorf("el rechazo no debe guardar fecha: viaje %+v, error %v", det, err)
+	}
+
+	fecha := ahora.Add(24 * time.Hour)
 	out, err := api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
 	if err != nil {
 		t.Fatalf("CompletarFechaHora: %v", err)
@@ -512,20 +649,37 @@ func TestConsultasCompletarFechaHora(t *testing.T) {
 		t.Errorf("viaje: got id %s estado %q fecha %v, want %s APROBADO %v", out.Id, out.Estado, out.FechaHoraServicio, v.Id, fecha)
 	}
 
-	monitorista := &auth.Claims{Subject: "mon-1", Rol: "monitorista", Audiencia: auth.AudienciaInterno}
-	darAlcance(t, ctx, monitorista, v.Id) // en alcance: 403 por facultad, no 404 por alcance
-	if _, err := api.CompletarFechaHora(auth.ContextWithClaims(ctx, monitorista), v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha}); platformerrors.AsCategory(err).HTTPStatus() != 403 {
-		t.Errorf("monitorista: err %v, quiere 403", err)
+	fechaAdmin := fecha.Add(time.Hour)
+	var actualizado operclient.Viaje
+	if rec := pedir(m, http.MethodPatch, path, cuerpo(fechaAdmin), "administrador"); rec.Code != 200 ||
+		json.Unmarshal(rec.Body.Bytes(), &actualizado) != nil || actualizado.FechaHoraServicio == nil || !actualizado.FechaHoraServicio.Equal(fechaAdmin) {
+		t.Errorf("HTTP fecha de Administrador: %d %s; quiere 200 con la nueva fecha", rec.Code, rec.Body)
+	}
+	for _, actor := range []*auth.Claims{claimsMonitorista, claimsSupervisor, claimsCoordinador} {
+		darAlcance(t, ctx, actor, v.Id) // 403 por facultad, no 404 por alcance
+		_, err := api.CompletarFechaHora(como(actor), v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+		esStatus(t, actor.Rol+" no completa fecha/hora", err, 403)
+		if rec := pedir(m, http.MethodPatch, path, cuerpo(fecha), actor.Rol); rec.Code != 403 {
+			t.Errorf("HTTP fecha de %s: %d %s; quiere 403", actor.Rol, rec.Code, rec.Body)
+		}
 	}
 
 	admin, cerrar := dbtest.AdminConn(t, ctx)
 	defer cerrar()
 	dbtest.Exec(t, ctx, admin, "UPDATE viajes.viaje SET estado='CERRADO' WHERE id='"+v.Id.String()+"'")
-	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: fecha})
+	_, err = api.CompletarFechaHora(ctxJefe, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: pasada})
+	esStatus(t, "viaje terminal con fecha pasada", err, http.StatusConflict)
 	if got := platformerrors.CodigoDe(err); got != "viaje_en_estado_terminal" {
 		t.Errorf("terminal: codigo %q (err %v), want viaje_en_estado_terminal", got, err)
 	}
-	mismoStatus(t, m, err, http.MethodPatch, "/api/v1/viajes/"+v.Id.String()+"/fecha-hora", `{"fecha_hora_servicio":"2026-11-20T15:30:00Z"}`, 409)
+	rec := pedir(m, http.MethodPatch, path, cuerpo(pasada), "jefe_operativo")
+	var problema struct {
+		Codigo string `json:"codigo"`
+	}
+	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &problema) != nil ||
+		problema.Codigo != "viaje_en_estado_terminal" {
+		t.Errorf("HTTP viaje terminal con fecha pasada: %d %s; quiere 409 viaje_en_estado_terminal", rec.Code, rec.Body)
+	}
 }
 
 // TestConsultasListarIncidencias: el histórico trae la resuelta y la abierta, en
@@ -620,6 +774,10 @@ func TestConsultasFicha(t *testing.T) {
 	}
 	if g := *f.GpsIds; len(g) != 2 || g[0] != g1 || g[1] != g2 {
 		t.Errorf("gps_ids: got %v, want [%s %s]", g, g1, g2)
+	}
+	if rec := pedir(m, http.MethodGet, "/api/v1/viajes/"+id.String()+"/ficha", "", "x"); rec.Code != 200 ||
+		!strings.Contains(rec.Body.String(), `"placas":"ABC-123"`) {
+		t.Errorf("HTTP ficha del Jefe Operativo: %d %s; quiere 200 con el tracto", rec.Code, rec.Body)
 	}
 
 	// Solo gps_ids: [] borra la lista y no toca tracto ni contenedores.

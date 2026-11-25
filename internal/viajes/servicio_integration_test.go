@@ -257,6 +257,49 @@ func TestFijarEta(t *testing.T) {
 	}
 }
 
+func TestCompletarFechaHoraExigeInstanteFuturo(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 25, 6, 0, 0, 0, time.UTC)
+	svc := prepara(t, ctx).ConReloj(func() time.Time { return now })
+	zona, err := time.LoadLocation("America/Mexico_City")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliente := uuid.New()
+	fechaOriginal := now.Add(time.Hour)
+	v, err := svc.Crear(ctx, operclient.CrearViajeEntrada{
+		ClienteId: &cliente, Origen: "Origen", Destinos: []operclient.Destino{{Nombre: "Destino"}},
+		FechaHoraServicio: &fechaOriginal,
+	}, "jefe_operativo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		nombre string
+		fecha  time.Time
+	}{
+		{"anterior", now.Add(-time.Second).In(zona)},
+		{"mismo_instante_en_otra_zona", now.In(zona)},
+		{"posterior_pero_igual_al_persistir", now.Add(time.Nanosecond).In(zona)},
+	} {
+		t.Run(tc.nombre, func(t *testing.T) {
+			_, err := svc.CompletarFechaHora(ctx, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: tc.fecha})
+			if err == nil || platformerrors.AsCategory(err) != platformerrors.CategoryValidacion {
+				t.Fatalf("fecha %v: error %v; quiere validación 400", tc.fecha, err)
+			}
+			out, err := svc.Obtener(ctx, v.Id)
+			if err != nil || out.Viaje.FechaHoraServicio == nil || !out.Viaje.FechaHoraServicio.Equal(fechaOriginal) {
+				t.Fatalf("el rechazo debe conservar %v: viaje %+v, error %v", fechaOriginal, out, err)
+			}
+		})
+	}
+	futura := now.Add(time.Second).In(zona)
+	out, err := svc.CompletarFechaHora(ctx, v.Id, operclient.FechaHoraEntrada{FechaHoraServicio: futura})
+	if err != nil || out.FechaHoraServicio == nil || !out.FechaHoraServicio.Equal(futura) {
+		t.Fatalf("fecha futura %v: viaje %+v, error %v", futura, out, err)
+	}
+}
+
 func TestFijarEtaRechazos(t *testing.T) {
 	ctx := context.Background()
 	svc := prepara(t, ctx)
