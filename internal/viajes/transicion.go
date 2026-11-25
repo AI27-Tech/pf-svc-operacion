@@ -9,6 +9,7 @@ import (
 
 	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/estados"
 	operclient "github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/operacion"
+	"github.com/AI27-Tech/pf-pkg-contracts/packages/api-client-go/roles"
 	platformerrors "github.com/AI27-Tech/pf-pkg-platform-go/errors"
 	"github.com/AI27-Tech/pf-pkg-platform-go/outbox"
 	"github.com/google/uuid"
@@ -26,9 +27,8 @@ const audienciaCliente = "Cliente"
 // el cambio de estado, su fila de historia y el evento viaje.estado_cambiado en
 // la MISMA transacción (P17). Devuelve el viaje actualizado.
 //
-// rol es el rol del actor (claims.Rol), necesario para las guardas que verifican
-// facultad por rol (el cierre anticipado por incidencia solo lo hace un operador
-// interno autorizado, DEC-020 #6 / DEC-060 #1). El resto de las aristas lo ignora.
+// rol es el rol del actor (claims.Rol), necesario para las guardas de avance y
+// cierre (DEC-149 #8 y DEC-152 #9).
 //
 // audiencia y tenantID son la Audiencia de dominio y el tenant del actor
 // (claims.Audiencia, claims.TenantID). Habilitan la transición de cliente de
@@ -63,8 +63,7 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 		return nil, fmt.Errorf("operacion: cargar viaje: %w", err)
 	}
 
-	// Facultades del cliente sobre SU viaje (E9-T7, DEC-111). Solo aplica a
-	// audiencia Cliente; un actor interno conserva el comportamiento previo.
+	// Facultades del cliente sobre SU viaje (E9-T7, DEC-111).
 	if audiencia == audienciaCliente {
 		// (a) Aislamiento por tenant. tenant = cliente (DEC-112): un cliente solo
 		// toca su propio viaje. Un viaje ajeno devuelve 404, NO 403: un 403
@@ -93,6 +92,13 @@ func (s *Servicio) Transicionar(ctx context.Context, id operclient.Id, in opercl
 	de := estados.EstadoViaje(estadoAct)
 	if !estados.PuedeTransicionar(de, destino) {
 		return nil, platformerrors.NewConflicto("operacion: transición no permitida de %s a %s", de, destino)
+	}
+	// DEC-149 #7 y #8: marcar APTO_PARA_SALIDA no es avance. El cierre conserva su propia guarda.
+	switch destino {
+	case estados.EstadoEnEmbarque, estados.EstadoEnTransito, estados.EstadoEnDestino, estados.EstadoEnDescarga:
+		if rol == string(roles.RolJefeOperativo) {
+			return nil, platformerrors.NewProhibido("operacion: el jefe operativo no puede avanzar el viaje a %s", destino)
+		}
 	}
 
 	// El cierre (destino CERRADO) tiene su propia validación: necesita leer una
